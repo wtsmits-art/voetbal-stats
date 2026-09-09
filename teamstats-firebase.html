@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TeamStats – Voetbalstatistieken</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<!-- Firebase (compat) – voor live delen tussen telefoons -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<style>
+  html,body{background:#0a0a0a;color:#fff;-webkit-tap-highlight-color:transparent;}
+  ::-webkit-scrollbar{width:0;height:0;}
+  .card{background:#171717;border:1px solid #262626;border-radius:16px;}
+  .btn{transition:transform .05s ease, background .15s ease;}
+  .btn:active{transform:scale(.97);}
+  input,select,textarea{background:#262626;border:1px solid #3a3a3a;color:#fff;border-radius:10px;}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:#22c55e;}
+  textarea::placeholder,input::placeholder{color:#737373;}
+  select option{background:#262626;}
+  .tl-dot{width:10px;height:10px;border-radius:50%;flex:none;margin-top:5px;}
+  @media print{
+    body *{visibility:hidden;}
+    #printArea, #printArea *{visibility:visible;}
+    #printArea{position:absolute;left:0;top:0;width:100%;color:#000;background:#fff;}
+    #printArea table{color:#000;}
+  }
+</style>
+</head>
+<body class="max-w-lg mx-auto pb-24 select-none">
+
+<!-- Klein teamlogo rechtsboven (op elke pagina, behalve Overzicht waar het naast de naam staat) -->
+<div class="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-lg z-30 pointer-events-none"><div id="topLogo" class="absolute top-2 right-2"></div></div>
+
+<div id="app"></div>
+
+<nav id="bottomnav" class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-lg bg-[#111] border-t border-[#262626] grid grid-cols-6 z-40"></nav>
+
+<div id="modalRoot"></div>
+
+<script>
+/* ==================================================================
+   TeamStats – amateur football statistics
+   ------------------------------------------------------------------
+   Alle data-toegang loopt via het Database-object hieronder.
+   Nu: LocalStorage. Straks: Firebase (zie de instructies in je project).
+   Je hoeft NERGENS anders in de code iets te veranderen om over te
+   stappen — alleen de methodes van Database vervangen.
+   ================================================================== */
+
+/* ==================================================================
+   >>> STAP 1: PLAK HIER JE FIREBASE-CONFIG <<<
+   ------------------------------------------------------------------
+   Vervang alle "PLAK_HIER"-waarden hieronder door je eigen gegevens
+   uit de Firebase-console (Projectinstellingen -> Je apps -> Web-app
+   -> SDK setup and configuration -> "Config"). Meer hoef je NIET te
+   doen: de rest van de code staat al klaar.
+
+   Zolang hier nog "PLAK_HIER" staat, werkt de app gewoon LOKAAL
+   (zoals de originele versie) en zie je bovenin een rode balk.
+   ================================================================== */
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyCad3yioWqlE2C1iLrPcaksV4WZr8c0u74",
+  authDomain:        "teamstats-voetbal.firebaseapp.com",
+  projectId:         "teamstats-voetbal",
+  storageBucket:     "teamstats-voetbal.firebasestorage.app",
+  messagingSenderId: "702420588463",
+  appId:             "1:702420588463:web:841c4e97d6dbd12a47815a"
+};
+const CLUB_DOC = "teamstats-club";       // 1 gedeeld document voor de hele club
+
+// Firebase is "klaar" zodra je de config hebt ingevuld (geen PLAK_HIER meer).
+const FIREBASE_READY = !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.includes("PLAK_HIER"));
+
+/* ==================================================================
+   DATABASE HELPER  –  het ENIGE stuk dat je hoeft te vervangen
+   ================================================================== */
+const STORAGE_KEY = "teamstats_data_v1";
+const emptyData = () => ({ teams: [], seasons: [], players: [], matches: [] });
+
+let db = null;   // wordt de Firestore-verbinding zodra de config klopt
+
+const Database = {
+  async load() {
+    if (db){
+      const doc = await db.collection("clubs").doc(CLUB_DOC).get();
+      return doc.exists ? doc.data() : emptyData();
+    }
+    try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : emptyData(); }
+    catch (e) { return emptyData(); }
+  },
+  async save(data) {
+    if (db){ await db.collection("clubs").doc(CLUB_DOC).set(data); return; }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  },
+  subscribe(cb) {
+    if (db){
+      db.collection("clubs").doc(CLUB_DOC).onSnapshot((doc) => { if (doc.exists) cb(doc.data()); });
+      return;
+    }
+    window.addEventListener("storage", (e) => {
+      if (e.key === STORAGE_KEY && e.newValue) { try { cb(JSON.parse(e.newValue)); } catch (err) {} }
+    });
+  }
+};
+
+// Firebase opstarten zodra de config is ingevuld.
+if (FIREBASE_READY && typeof firebase !== 'undefined') {
+  try { firebase.initializeApp(FIREBASE_CONFIG); db = firebase.firestore(); }
+  catch (e) { console.error('Firebase-init mislukt:', e); db = null; }
+}
+
+/* ==================================================================
+   STATE
+   ================================================================== */
+let DATA = emptyData();
+
+const PREFS_KEY = "teamstats_prefs_v1";
+let PREFS = (() => {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; }
+  catch (e) { return {}; }
+})();
+function savePrefs(){ localStorage.setItem(PREFS_KEY, JSON.stringify(PREFS)); }
+
+/* Live-wedstrijd timer. We tellen in SECONDEN op de wedstrijdklok.
+   half 1: 0..2700 = 00:00..45:00, daarna blessuretijd.
+   half 2: 2700..5400 = 45:00..90:00, daarna blessuretijd. */
+let LIVE = { matchId: null, seconds: 0, half: 1, running: false, timer: null };
+
+const HALF1_CAP = 45*60, HALF2_CAP = 90*60;
+function timerCap(){ return LIVE.half===1 ? HALF1_CAP : HALF2_CAP; }
+function timerParts(){
+  const cap = timerCap();
+  return { reg: Math.min(LIVE.seconds, cap), stop: Math.max(0, LIVE.seconds - cap) };
+}
+// Gelogde minuut (incl. blessuretijd: 45:00 [+02:15] -> minuut 47)
+const liveMin = () => {
+  const cap = timerCap();
+  if (LIVE.seconds <= cap) return Math.floor(LIVE.seconds/60);
+  return (cap/60) + Math.floor((LIVE.seconds - cap)/60);
+};
+const fmtTime = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+function timerHTML(){
+  const { reg, stop } = timerParts();
+  return fmtTime(reg) + (stop>0 ? ` <span class="text-red-500">[+${fmtTime(stop)}]</span>` : '');
+}
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+async function commit() { await Database.save(DATA); render(); }
+
+/* ==================================================================
+   HELPERS
+   ================================================================== */
+function currentTeam(){ return DATA.teams.find(t => t.id === PREFS.teamId) || DATA.teams[0] || null; }
+function currentSeason(){ return DATA.seasons.find(s => s.id === PREFS.seasonId) || DATA.seasons[0] || null; }
+function teamPlayers(teamId){ return DATA.players.filter(p => p.teamId === teamId && !p.isStaff); }
+function teamStaff(teamId){ return DATA.players.filter(p => p.teamId === teamId && p.isStaff); }
+function playerById(id){ return DATA.players.find(p => p.id === id); }
+function seasonMatches(teamId, seasonId){
+  return DATA.matches
+    .filter(m => m.teamId === teamId && m.seasonId === seasonId)
+    .sort((a,b) => (a.date+a.time).localeCompare(b.date+b.time));
+}
+// "gele" / "rode" (correcte spelling)
+const cardAdj = (ct) => ct==='Rood' ? 'rode' : 'gele';
+
+function playerMinutes(match, playerId){
+  const L = match.length || 90;
+  const subs = (match.events||[]).filter(e => e.type==='sub' && e.team!=='opp').sort((a,b)=>a.minute-b.minute);
+  const isStarter = (match.lineup||[]).includes(playerId);
+  let onFrom = isStarter ? 0 : null;
+  let total = 0;
+  for (const s of subs){
+    if (s.playerOutId === playerId && onFrom !== null){ total += s.minute - onFrom; onFrom = null; }
+    if (s.playerInId  === playerId && onFrom === null){ onFrom = s.minute; }
+  }
+  const red = (match.events||[]).find(e => e.type==='card' && e.cardType==='Rood' && e.playerId===playerId && e.team!=='opp');
+  let endCap = L;
+  if (red) endCap = Math.min(endCap, red.minute);
+  if (onFrom !== null) total += Math.max(0, endCap - onFrom);
+  return Math.max(0, Math.round(total));
+}
+function playerPlayed(match, playerId){
+  return (match.lineup||[]).includes(playerId) ||
+         (match.events||[]).some(e => e.type==='sub' && e.team!=='opp' && e.playerInId===playerId);
+}
+function computeStats(teamId, seasonId){
+  const played = seasonMatches(teamId, seasonId).filter(m => m.status === 'Gespeeld');
+  return teamPlayers(teamId).map(p => {
+    let gp=0, starts=0, subIn=0, goals=0, assists=0, yellow=0, red=0, minutes=0;
+    for (const m of played){
+      if (playerPlayed(m, p.id)) gp++;
+      if ((m.lineup||[]).includes(p.id)) starts++;
+      if ((m.events||[]).some(e => e.type==='sub' && e.team!=='opp' && e.playerInId===p.id)) subIn++;
+      minutes += playerMinutes(m, p.id);
+      for (const e of (m.events||[])){
+        if (e.team === 'opp') continue;
+        if (e.type==='goal' && e.playerId===p.id) goals++;
+        if (e.type==='goal' && e.assistId===p.id) assists++;
+        if (e.type==='card' && e.playerId===p.id && e.cardType==='Geel') yellow++;
+        if (e.type==='card' && e.playerId===p.id && e.cardType==='Rood') red++;
+      }
+    }
+    return { id:p.id, name:p.name, number:p.number, position:p.position, gp, starts, subIn, goals, assists, yellow, red, minutes };
+  });
+}
+function nextMatch(teamId, seasonId){
+  const today = new Date().toISOString().slice(0,10);
+  return seasonMatches(teamId, seasonId).filter(m => m.status !== 'Gespeeld' && m.date >= today)[0]
+    || seasonMatches(teamId, seasonId).filter(m => m.status !== 'Gespeeld')[0] || null;
+}
+function matchTitle(m){
+  const opp = m.opponent || 'Tegenstander';
+  const us = currentTeam() ? currentTeam().name : 'Ons team';
+  return m.homeAway === 'Uit' ? `${opp} - ${us}` : `${us} - ${opp}`;
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ==================================================================
+   ICS PARSER
+   ================================================================== */
+function parseICS(text){
+  const lines = text.replace(/\r\n/g,'\n').replace(/\n[ \t]/g,'').split('\n');
+  const events = []; let cur = null;
+  for (const line of lines){
+    if (line.startsWith('BEGIN:VEVENT')) cur = {};
+    else if (line.startsWith('END:VEVENT')){ if (cur) events.push(cur); cur = null; }
+    else if (cur){
+      const idx = line.indexOf(':'); if (idx === -1) continue;
+      const key = line.slice(0, idx).split(';')[0].toUpperCase();
+      const val = line.slice(idx+1).trim();
+      if (key === 'SUMMARY') cur.summary = val;
+      if (key === 'DTSTART') cur.dtstart = val;
+    }
+  }
+  return events.map(ev => {
+    const dt = (ev.dtstart||'').replace(/[^0-9TZ]/g,'');
+    let date='', time='';
+    if (dt.length >= 8){
+      date = `${dt.slice(0,4)}-${dt.slice(4,6)}-${dt.slice(6,8)}`;
+      const tIdx = dt.indexOf('T');
+      if (tIdx !== -1 && dt.length >= tIdx+5) time = `${dt.slice(tIdx+1,tIdx+3)}:${dt.slice(tIdx+3,tIdx+5)}`;
+    }
+    return { summary: ev.summary || 'Wedstrijd', date, time: time || '10:00' };
+  }).filter(e => e.date);
+}
+function guessOpponent(summary){
+  const us = (currentTeam()?.name || '').toLowerCase();
+  const parts = summary.split(/\s[-–vs]+\s/i);
+  if (parts.length === 2){
+    const [a,b] = parts.map(s => s.trim());
+    if (us && b.toLowerCase().includes(us.split(' ')[0])) return { opponent:a, homeAway:'Uit' };
+    return { opponent:b, homeAway:'Thuis' };
+  }
+  return { opponent: summary.trim(), homeAway:'Thuis' };
+}
+
+/* ==================================================================
+   GEDEELDE WEERGAVE: één regel in het wedstrijdverloop
+   Eigen team = links, tegenstander = rechts uitgelijnd.
+   ================================================================== */
+function eventRow(e, allowDelete){
+  const opp = e.team === 'opp';
+  let icon='•', main='';
+  if (e.type==='goal'){
+    icon='⚽';
+    main = opp ? `<b>${e.oppName?esc(e.oppName):'Tegenstander'}</b>`
+               : `<b>${esc(playerById(e.playerId)?.name||'?')}</b>${e.assistId?` <span class="text-neutral-400">(assist ${esc(playerById(e.assistId)?.name||'?')})</span>`:''}`;
+  } else if (e.type==='card'){
+    icon = e.cardType==='Rood'?'🟥':'🟨';
+    main = opp ? `<b>${e.oppName?esc(e.oppName):'Tegenstander'}</b> ${cardAdj(e.cardType)} kaart`
+               : `<b>${esc(playerById(e.playerId)?.name||'?')}</b> ${cardAdj(e.cardType)} kaart`;
+  } else if (e.type==='sub'){
+    icon='🔄';
+    main = opp ? `Wissel tegenstander${e.oppName?` <span class="text-neutral-400">(${esc(e.oppName)})</span>`:''}`
+               : `<span class="text-green-400">▲ ${esc(playerById(e.playerInId)?.name||'?')}</span> <span class="text-red-400">▼ ${esc(playerById(e.playerOutId)?.name||'?')}</span>`;
+  }
+  const dot = e.type==='goal'?'bg-green-500':e.type==='card'?(e.cardType==='Rood'?'bg-red-600':'bg-yellow-500'):'bg-blue-500';
+  const min = `<div class="w-9 text-neutral-400 font-mono text-sm flex-none">${e.minute}'</div>`;
+  const del = allowDelete ? `<button data-act="delEvent" data-id="${e.id}" class="btn text-neutral-600 px-1 text-xs">✕</button>` : '';
+  if (opp){
+    return `<div class="flex gap-2 items-start py-2 border-b border-[#222] justify-end text-right">
+      ${del}<div class="text-sm">${main} ${icon}</div><div class="tl-dot ${dot}"></div>${min}</div>`;
+  }
+  return `<div class="flex gap-2 items-start py-2 border-b border-[#222]">
+    ${min}<div class="tl-dot ${dot}"></div><div class="flex-1 text-sm">${icon} ${main}</div>${del}</div>`;
+}
+
+/* ==================================================================
+   RENDER
+   ================================================================== */
+const app = document.getElementById('app');
+const view = () => PREFS.view || 'dashboard';
+function goto(v){ PREFS.view = v; savePrefs(); render(); }
+
+function render(){
+  const t = currentTeam(), s = currentSeason();
+  renderNav();
+  renderTopLogo();
+  const v = view();
+  if (!t && v !== 'settings'){ app.innerHTML = welcomeScreen(); bind(); return; }
+  if (v === 'dashboard') app.innerHTML = dashboardView(t, s);
+  else if (v === 'players') app.innerHTML = playersView(t);
+  else if (v === 'agenda') app.innerHTML = agendaView(t, s);
+  else if (v === 'live') app.innerHTML = liveView(t, s);
+  else if (v === 'stats') app.innerHTML = statsView(t, s);
+  else if (v === 'settings') app.innerHTML = settingsView(t, s);
+  else app.innerHTML = dashboardView(t, s);
+  bind();
+}
+function header(title, sub){
+  return `<div class="px-4 pt-6 pb-2">
+    <h1 class="text-2xl font-bold">${esc(title)}</h1>
+    ${sub ? `<p class="text-neutral-400 text-sm mt-1">${esc(sub)}</p>` : ''}</div>`;
+}
+// Klein logo rechtsboven (niet op Overzicht — daar staat het naast de naam)
+function renderTopLogo(){
+  const el = document.getElementById('topLogo'); if (!el) return;
+  const t = currentTeam();
+  el.innerHTML = (t && t.logo && view()!=='dashboard')
+    ? `<img src="${t.logo}" alt="logo" class="w-9 h-9 rounded-lg object-cover border border-[#333] bg-[#171717]">` : '';
+}
+// Verklein een geüploade afbeelding naar max 256px en geef een data-URL terug.
+function resizeImage(file, max, cb){
+  const r = new FileReader();
+  r.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (w >= h && w > max){ h = Math.round(h*max/w); w = max; }
+      else if (h > w && h > max){ w = Math.round(w*max/h); h = max; }
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      cb(c.toDataURL('image/png'));
+    };
+    img.onerror = () => cb(null);
+    img.src = r.result;
+  };
+  r.readAsDataURL(file);
+}
+function handleLogoFile(e){
+  const f = e.target.files[0]; if (!f) return;
+  const t = currentTeam(); if (!t) return;
+  resizeImage(f, 256, (dataUrl) => { if (!dataUrl){ alert('Kon deze afbeelding niet laden.'); return; } t.logo = dataUrl; commit(); });
+}
+
+/* ---------- Welkomstscherm ---------- */
+function welcomeScreen(){
+  return header('TeamStats', 'Voetbalstatistieken voor je team') + `
+  <div class="px-4"><div class="card p-6 text-center">
+      <div class="text-5xl mb-3">⚽</div>
+      <h2 class="text-lg font-bold mb-1">Welkom!</h2>
+      <p class="text-neutral-400 text-sm mb-5">Maak eerst een team en een seizoen aan bij <b>Instellingen</b> om te beginnen.</p>
+      <button data-act="gotoSettings" class="btn w-full bg-green-600 hover:bg-green-500 py-4 rounded-xl font-bold text-lg">⚙ Naar Instellingen</button>
+  </div></div>`;
+}
+
+/* ---------- 1. DASHBOARD (Overzicht) – seizoenstotalen ---------- */
+function dashboardView(t, s){
+  const stats = s ? computeStats(t.id, s.id) : [];
+  const topscorer = [...stats].sort((a,b)=>b.goals-a.goals)[0];
+  const topassist = [...stats].sort((a,b)=>b.assists-a.assists)[0];
+  const nm = s ? nextMatch(t.id, s.id) : null;
+  const gespeeld = s ? seasonMatches(t.id,s.id).filter(m=>m.status==='Gespeeld').length : 0;
+  const totGoals = stats.reduce((a,b)=>a+b.goals,0);
+
+  return `<div class="px-4 pt-6 pb-2 flex items-center gap-3">
+    ${t.logo ? `<img src="${t.logo}" alt="logo" class="w-8 h-8 rounded-lg object-cover border border-[#333] flex-none">` : ''}
+    <div class="min-w-0">
+      <h1 class="text-2xl font-bold truncate">${esc(t.name)}</h1>
+      <p class="text-neutral-400 text-sm">${s ? 'Seizoen '+esc(s.name) : 'Nog geen seizoen'}</p>
+    </div>
+  </div>` + `
+  <div class="px-4 space-y-4">
+    <div>
+      <h3 class="text-lg font-bold mb-2">Eerstvolgende wedstrijd</h3>
+      ${nm ? `
+      <div class="card p-4">
+        <div class="text-lg font-bold">${esc(matchTitle(nm))}</div>
+        <div class="text-neutral-400 text-sm mt-1">${esc(nm.date)} · ${esc(nm.time)} · ${esc(nm.homeAway)} · ${esc(nm.type||'Competitie')}</div>
+        <button data-act="startLive" data-id="${nm.id}" class="btn mt-3 text-green-400 font-semibold">Score en acties bijwerken →</button>
+      </div>` : `<div class="card p-4 text-neutral-400 text-sm">Nog geen geplande wedstrijd. Voeg er een toe bij Wedstrijden.</div>`}
+    </div>
+
+    <h3 class="text-lg font-bold">Seizoenstotalen</h3>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Topscorer</div>
+        <div class="text-lg font-bold mt-1 truncate">${topscorer && topscorer.goals>0 ? esc(topscorer.name) : 'Nog niet bekend'}</div>
+        <div class="text-neutral-500 text-xs">${topscorer ? topscorer.goals : 0} goals</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Meeste assists</div>
+        <div class="text-lg font-bold mt-1 truncate">${topassist && topassist.assists>0 ? esc(topassist.name) : 'Nog niet bekend'}</div>
+        <div class="text-neutral-500 text-xs">${topassist ? topassist.assists : 0} assists</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Gespeelde wedstrijden</div>
+        <div class="text-3xl font-bold mt-1">${gespeeld}</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Doelpunten voor</div>
+        <div class="text-3xl font-bold mt-1">${totGoals}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------- 2. SPELERS / STAF ---------- */
+function playersView(t){
+  const players = teamPlayers(t.id).sort((a,b)=>(a.number||99)-(b.number||99));
+  const staff = teamStaff(t.id);
+  const row = p => `<div class="card p-3 flex items-center gap-3">
+      <div class="w-9 h-9 rounded-full bg-green-600/20 text-green-400 font-bold flex items-center justify-center flex-none">${p.number ?? '–'}</div>
+      <div class="flex-1 min-w-0"><div class="font-semibold truncate">${esc(p.name)}</div><div class="text-neutral-400 text-xs">${esc(p.position||'—')}</div></div>
+      <button data-act="editPlayer" data-id="${p.id}" class="btn text-neutral-400 px-2">✎</button>
+      <button data-act="delPlayer" data-id="${p.id}" class="btn text-red-400 px-2">🗑</button></div>`;
+  const staffRow = p => `<div class="card p-3 flex items-center gap-3">
+      <div class="w-9 h-9 rounded-full bg-blue-600/20 text-blue-300 font-bold flex items-center justify-center flex-none">S</div>
+      <div class="flex-1 min-w-0"><div class="font-semibold truncate">${esc(p.name)}</div><div class="text-neutral-400 text-xs">${esc(p.position||'Staf')}</div></div>
+      <button data-act="editPlayer" data-id="${p.id}" class="btn text-neutral-400 px-2">✎</button>
+      <button data-act="delPlayer" data-id="${p.id}" class="btn text-red-400 px-2">🗑</button></div>`;
+
+  return header('Spelers / Staf', t.name) + `
+  <div class="px-4 space-y-3">
+    <div class="grid grid-cols-2 gap-2">
+      <button data-act="addPlayer" class="btn bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Speler</button>
+      <button data-act="addStaff" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">+ Staflid</button>
+    </div>
+    <button data-act="bulkAdd" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">📋 Meerdere in één keer plakken</button>
+    <div class="grid grid-cols-3 gap-2 text-center">
+      <div class="card p-3"><div class="text-2xl font-bold">${players.length}</div><div class="text-xs text-neutral-400">Spelers</div></div>
+      <div class="card p-3"><div class="text-2xl font-bold">${staff.length}</div><div class="text-xs text-neutral-400">Staf</div></div>
+      <div class="card p-3"><div class="text-2xl font-bold">${DATA.matches.filter(m=>m.teamId===t.id).length}</div><div class="text-xs text-neutral-400">Wedstrijden</div></div>
+    </div>
+    <h3 class="font-bold mt-2">Selectie</h3>
+    ${players.length ? players.map(row).join('') : '<div class="text-neutral-500 text-sm">Nog geen spelers.</div>'}
+    <h3 class="font-bold mt-4">Staf</h3>
+    ${staff.length ? staff.map(staffRow).join('') : '<div class="text-neutral-500 text-sm">Nog geen staf.</div>'}
+  </div>`;
+}
+
+/* ---------- 3. WEDSTRIJDEN ---------- */
+function agendaView(t, s){
+  if (!s) return header('Wedstrijden') + '<div class="px-4 text-neutral-400">Maak eerst een seizoen aan bij Instellingen.</div>';
+  const matches = seasonMatches(t.id, s.id);
+  const planned = matches.filter(m => m.status !== 'Gespeeld');
+  const played  = matches.filter(m => m.status === 'Gespeeld');
+  const row = m => {
+    const gespeeld = m.status==='Gespeeld';
+    const actBtn = gespeeld
+      ? `<button data-act="editPlayed" data-id="${m.id}" class="btn bg-[#262626] hover:bg-[#333] text-neutral-200 text-xs font-bold px-3 py-2 rounded-lg">Bewerken</button>`
+      : `<button data-act="startLive" data-id="${m.id}" class="btn bg-green-600/20 text-green-400 text-xs font-bold px-3 py-2 rounded-lg">Invoer</button>`;
+    return `<div class="card p-3 flex items-center gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold truncate">${esc(matchTitle(m))}</div>
+        <div class="text-neutral-400 text-xs">${esc(m.date)} · ${esc(m.time)} · ${esc(m.homeAway)}${gespeeld?` · <span class="text-white font-semibold">${m.homeScore}–${m.awayScore}</span>`:''}</div>
+      </div>${actBtn}
+      <button data-act="delMatch" data-id="${m.id}" class="btn text-red-400 px-1">🗑</button></div>`;
+  };
+  return header('Wedstrijden', `${t.name} · ${s.name}`) + `
+  <div class="px-4 space-y-3">
+    <div class="grid grid-cols-2 gap-2">
+      <button data-act="addMatch" class="btn bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Wedstrijd</button>
+      <button data-act="importICS" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">⬆ ICS importeren</button>
+    </div>
+    <h3 class="font-bold mt-2">Gepland (${planned.length})</h3>
+    ${planned.length ? planned.map(row).join('') : '<div class="text-neutral-500 text-sm">Geen geplande wedstrijden.</div>'}
+    ${played.length ? `<h3 class="font-bold mt-4">Gespeeld (${played.length})</h3>${played.map(row).join('')}` : ''}
+  </div>`;
+}
+
+/* ---------- 4. LIVE MATCH TRACKER ---------- */
+function liveView(t, s){
+  const m = DATA.matches.find(x => x.id === LIVE.matchId);
+  if (!m){
+    const today = new Date().toISOString().slice(0,10);
+    const matches = s ? seasonMatches(t.id, s.id).filter(x => x.date === today) : [];
+    return header('Live invoer', 'Wedstrijden van vandaag') + `
+    <div class="px-4 space-y-2">
+      ${matches.length ? matches.map(x => `<button data-act="startLive" data-id="${x.id}" class="btn card p-4 w-full text-left flex items-center justify-between">
+        <div><div class="font-semibold">${esc(matchTitle(x))}</div><div class="text-neutral-400 text-xs">${esc(x.time)} · ${esc(x.homeAway)} · ${esc(x.status||'Gepland')}</div></div>
+        <span class="text-green-400">→</span></button>`).join('')
+        : `<div class="card p-4 text-neutral-400 text-sm">Geen wedstrijden vandaag (${esc(today)}). Een wedstrijd op een andere dag open je via <b>Wedstrijden</b> met de knop Invoer/Bewerken.</div>`}
+    </div>`;
+  }
+  const events = (m.events||[]).slice().sort((a,b)=>a.minute-b.minute);
+  const leftName = m.homeAway==='Uit'?m.opponent:t.name;
+  const rightName = m.homeAway==='Uit'?t.name:m.opponent;
+  const statusLabel = m.status==='Gespeeld' ? 'Eindstand' : 'Tussenstand';
+
+  return `<div class="px-4 pt-6 pb-2">
+    <button data-act="closeLive" class="text-neutral-400 text-sm mb-2">← Terug</button>
+    <h1 class="text-xl font-bold">${esc(matchTitle(m))}</h1>
+    <p class="text-neutral-400 text-sm">${esc(m.date)} · ${esc(m.homeAway)}</p>
+  </div>
+  <div class="px-4 space-y-4">
+
+    <!-- Score -->
+    <div class="card p-4">
+      <div class="grid grid-cols-3 items-center text-center">
+        <div>
+          <div class="text-xs text-neutral-400 truncate">${esc(leftName)}</div>
+          <div class="text-4xl font-bold my-1">${m.homeScore||0}</div>
+          <div class="flex gap-1 justify-center">
+            <button data-act="goalMinus" data-side="home" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">−</button>
+            <button data-act="goalPlus" data-side="home" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">+</button>
+          </div>
+        </div>
+        <div class="text-neutral-500 text-2xl">–</div>
+        <div>
+          <div class="text-xs text-neutral-400 truncate">${esc(rightName)}</div>
+          <div class="text-4xl font-bold my-1">${m.awayScore||0}</div>
+          <div class="flex gap-1 justify-center">
+            <button data-act="goalMinus" data-side="away" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">−</button>
+            <button data-act="goalPlus" data-side="away" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">+</button>
+          </div>
+        </div>
+      </div>
+      <p class="text-neutral-500 text-[11px] text-center mt-2">+ opent het goal-venster · − verwijdert het laatste doelpunt van dat team</p>
+    </div>
+
+    <!-- Timer (tweefasen) -->
+    <div class="card p-4 text-center">
+      <div id="timerDisplay" class="text-5xl font-bold font-mono">${timerHTML()}</div>
+      <div class="text-neutral-500 text-xs mt-1">${LIVE.half===1?'1e helft':'2e helft'} · minuut ${liveMin()}</div>
+      <div class="flex gap-2 mt-3 justify-center">
+        <button data-act="timerMinus" class="btn bg-[#262626] w-12 h-11 rounded-lg text-sm font-bold">−1'</button>
+        <button data-act="timerToggle" class="btn ${LIVE.running?'bg-yellow-600 hover:bg-yellow-500':'bg-green-600 hover:bg-green-500'} flex-1 h-11 rounded-lg font-bold">${LIVE.running?'⏸ Pauze':'▶ Start'}</button>
+        <button data-act="timerPlus" class="btn bg-[#262626] w-12 h-11 rounded-lg text-sm font-bold">+1'</button>
+      </div>
+      <div class="grid grid-cols-2 gap-2 mt-2">
+        <button data-act="firstHalf" class="btn bg-[#262626] hover:bg-[#333] py-2.5 rounded-lg text-sm font-semibold ${LIVE.half===1?'text-green-400':''}">1e helft</button>
+        <button data-act="secondHalf" class="btn bg-[#262626] hover:bg-[#333] py-2.5 rounded-lg text-sm font-semibold ${LIVE.half===2?'text-green-400':''}">2e helft (→ 45:00)</button>
+      </div>
+    </div>
+
+    <!-- Opstelling -->
+    <button data-act="lineup" class="btn card p-4 w-full text-left flex items-center justify-between">
+      <div><div class="font-semibold">Opstelling &amp; basisspelers</div><div class="text-neutral-400 text-xs">${(m.lineup||[]).length} basisspelers geselecteerd</div></div>
+      <span class="text-green-400">bewerken →</span>
+    </button>
+
+    <!-- Actieknoppen -->
+    <div class="grid grid-cols-3 gap-2">
+      <button data-act="logGoal" class="btn bg-green-600 hover:bg-green-500 py-5 rounded-xl font-bold text-lg">⚽<br><span class="text-sm">Goal</span></button>
+      <button data-act="logCard" class="btn bg-yellow-600 hover:bg-yellow-500 py-5 rounded-xl font-bold text-lg">🟨<br><span class="text-sm">Kaart</span></button>
+      <button data-act="logSub" class="btn bg-blue-600 hover:bg-blue-500 py-5 rounded-xl font-bold text-lg">🔄<br><span class="text-sm">Wissel</span></button>
+    </div>
+    <p class="text-neutral-500 text-xs text-center">In elk venster kies je <b>Eigen team</b> of <b>Tegenstander</b>.</p>
+
+    <button data-act="finishMatch" class="btn w-full ${m.status==='Gespeeld'?'bg-[#262626]':'bg-[#1f3d2b] hover:bg-[#264a34] text-green-300'} py-3 rounded-xl font-semibold">
+      ${m.status==='Gespeeld'?'✓ Afgerond — heropenen':'Wedstrijd afronden (gespeelde tijd = huidige timer)'}
+    </button>
+
+    <!-- Wedstrijdverloop (met score voor de screenshot) -->
+    <div>
+      <h3 class="font-bold mb-1">Wedstrijdverloop</h3>
+      <div id="timelineArea" class="card p-3">
+        <div class="text-center pb-2 mb-2 border-b border-[#222]">
+          <div class="text-sm font-semibold">${esc(leftName)} <span class="text-green-400">${m.homeScore||0} – ${m.awayScore||0}</span> ${esc(rightName)}</div>
+          <div class="text-[11px] text-neutral-400">${esc(m.date)} · ${statusLabel}</div>
+        </div>
+        <div class="flex justify-between text-[11px] text-neutral-500 pb-1 mb-1">
+          <span>◀ ${esc(leftName)} (eigen)</span><span>${esc(rightName)} (tegenstander) ▶</span>
+        </div>
+        ${events.length ? events.map(e => eventRow(e, true)).join('') : '<div class="text-neutral-500 text-sm text-center py-4">Nog geen acties. Log een goal, kaart of wissel.</div>'}
+      </div>
+      <button data-act="shotTimeline" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold mt-2">🖼 Screenshot van het verloop</button>
+    </div>
+  </div>`;
+}
+
+/* ---------- 5. STATISTIEKEN ---------- */
+function statsView(t, s){
+  if (!s) return header('Statistieken') + '<div class="px-4 text-neutral-400">Maak eerst een seizoen aan bij Instellingen.</div>';
+  const sortKey = PREFS.sortKey || 'goals';
+  const rows = computeStats(t.id, s.id).sort((a,b)=>{
+    if (sortKey==='name') return a.name.localeCompare(b.name);
+    return (b[sortKey]||0) - (a[sortKey]||0);
+  });
+  const cols = [['name','Speler'],['gp','GW'],['starts','Bas'],['subIn','Wis'],['goals','G'],['assists','A'],['yellow','🟨'],['red','🟥'],['minutes','Min']];
+  const th = cols.map(([k,l]) => `<th data-sort="${k}" class="px-2 py-2 text-left cursor-pointer whitespace-nowrap ${sortKey===k?'text-green-400':'text-neutral-400'}">${l}${sortKey===k?' ▾':''}</th>`).join('');
+  const body = rows.map(r => `<tr class="border-t border-[#222]">
+      <td class="px-2 py-2 font-medium whitespace-nowrap">${esc(r.name)}${r.number!=null?` <span class="text-neutral-500 text-xs">#${r.number}</span>`:''}</td>
+      <td class="px-2 py-2 text-center">${r.gp}</td>
+      <td class="px-2 py-2 text-center">${r.starts||''}</td>
+      <td class="px-2 py-2 text-center">${r.subIn||''}</td>
+      <td class="px-2 py-2 text-center font-bold ${r.goals?'text-green-400':''}">${r.goals}</td>
+      <td class="px-2 py-2 text-center ${r.assists?'text-blue-300':''}">${r.assists}</td>
+      <td class="px-2 py-2 text-center">${r.yellow||''}</td>
+      <td class="px-2 py-2 text-center">${r.red||''}</td>
+      <td class="px-2 py-2 text-center text-neutral-300">${r.minutes}</td></tr>`).join('');
+  return header('Statistieken', `${t.name} · ${s.name}`) + `
+  <div class="px-4 space-y-3">
+    <div class="grid grid-cols-2 gap-2">
+      <button data-act="exportCSV" class="btn bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">⬇ Export CSV</button>
+      <button data-act="printTable" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">🖼 Screenshot / print</button>
+    </div>
+    <div id="printArea" class="card p-2 overflow-x-auto">
+      <div class="px-2 py-2 font-bold hidden print:block">${esc(t.name)} — Statistieken ${esc(s.name)}</div>
+      <table class="w-full text-sm">
+        <thead><tr>${th}</tr></thead>
+        <tbody>${rows.length?body:'<tr><td colspan="9" class="text-center text-neutral-500 py-6">Nog geen data. Speel en registreer wedstrijden.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <p class="text-neutral-500 text-xs">GW = gespeelde wedstrijden · Bas = basisplaatsen · Wis = wisselbeurten (ingevallen) · G = goals · A = assists · Min = speelminuten. Tik een kolomkop om te sorteren.</p>
+  </div>`;
+}
+
+/* ---------- 6. INSTELLINGEN ---------- */
+function settingsView(t, s){
+  const teamOpts = DATA.teams.map(x => `<option value="${x.id}" ${x.id===t?.id?'selected':''}>${esc(x.name)}</option>`).join('');
+  const seasonOpts = DATA.seasons.map(x => `<option value="${x.id}" ${x.id===s?.id?'selected':''}>${esc(x.name)}</option>`).join('');
+  return header('Instellingen', 'Kies en beheer je team en seizoen') + `
+  <div class="px-4 space-y-4">
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Actief team</h3>
+      ${DATA.teams.length ? `<select id="teamSel" class="w-full py-3 px-3 font-semibold">${teamOpts}</select>` : '<p class="text-neutral-400 text-sm">Nog geen team.</p>'}
+      <button data-act="addTeam" class="btn w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Nieuw team</button>
+      ${t ? `<button data-act="renameTeam" class="btn w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl text-sm font-semibold">Team hernoemen</button>` : ''}
+      ${t ? `
+      <div class="border-t border-[#262626] pt-3">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 rounded-lg bg-[#262626] border border-[#333] flex items-center justify-center overflow-hidden flex-none">
+            ${t.logo ? `<img src="${t.logo}" alt="logo" class="w-full h-full object-cover">` : '<span class="text-neutral-500 text-xs">geen</span>'}
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-semibold">Teamlogo</div>
+            <div class="text-neutral-500 text-xs">JPG, JPEG of PNG · klein weergegeven rechtsboven</div>
+          </div>
+        </div>
+        <label class="btn block w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl text-sm font-semibold text-center cursor-pointer mt-2">
+          ${t.logo ? 'Logo vervangen' : 'Logo uploaden'}
+          <input id="logoInput" type="file" accept="image/png,image/jpeg,image/jpg" class="hidden">
+        </label>
+        ${t.logo ? `<button data-act="removeLogo" class="btn w-full text-red-400 py-2 rounded-xl text-sm font-semibold mt-1">Logo verwijderen</button>` : ''}
+      </div>` : ''}
+    </div>
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Actief seizoen</h3>
+      ${DATA.seasons.length ? `<select id="seasonSel" class="w-full py-3 px-3 font-semibold">${seasonOpts}</select>` : '<p class="text-neutral-400 text-sm">Nog geen seizoen.</p>'}
+      <button data-act="addSeason" class="btn w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Nieuw seizoen</button>
+    </div>
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Back-up &amp; herstel</h3>
+      <p class="text-neutral-400 text-sm">Bewaar al je data (teams, spelers, wedstrijden) als bestand, of zet een eerdere back-up terug. Handig bij updates van de app.</p>
+      <button data-act="exportData" class="btn w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">⬇ Exporteer data (JSON)</button>
+      <button data-act="importData" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">⬆ Importeer data (JSON)</button>
+      <p class="text-neutral-500 text-xs">Je data staat nu lokaal in deze browser. Zie het document in je project voor de stappen naar live delen met Firebase.</p>
+    </div>
+  </div>`;
+}
+
+/* ---------- Bottom nav ---------- */
+function renderNav(){
+  const items = [
+    ['dashboard','Overzicht','▦'],
+    ['agenda','Wedstrijden','📅'],
+    ['players','Spelers','👥'],
+    ['live','Invoer','✎'],
+    ['stats','Stats','📊'],
+    ['settings','Instel.','⚙'],
+  ];
+  document.getElementById('bottomnav').innerHTML = items.map(([v,l,ic]) =>
+    `<button data-nav="${v}" class="btn py-2.5 flex flex-col items-center gap-0.5 ${view()===v?'text-green-400':'text-neutral-500'}">
+       <span class="text-lg leading-none">${ic}</span><span class="text-[10px]">${l}</span></button>`).join('');
+}
+
+/* ==================================================================
+   MODALS
+   ================================================================== */
+const modalRoot = document.getElementById('modalRoot');
+function closeModal(){ modalRoot.innerHTML=''; }
+function openModal(title, inner, footer){
+  modalRoot.innerHTML = `<div class="fixed inset-0 bg-black/70 z-50 flex items-end sm:items-center justify-center" data-modalbg>
+    <div class="bg-[#171717] w-full max-w-lg rounded-t-2xl sm:rounded-2xl border border-[#333] max-h-[90vh] overflow-y-auto"><div class="p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold">${esc(title)}</h2>
+        <button data-act="closeModal" class="btn text-neutral-400 text-2xl leading-none">×</button>
+      </div>${inner}${footer||''}
+    </div></div></div>`;
+  modalRoot.querySelector('[data-modalbg]').addEventListener('click', e => { if (e.target.dataset.modalbg!==undefined) closeModal(); });
+  bindModal();
+}
+const field = (label, html) => `<label class="block mb-3"><span class="text-sm text-neutral-400">${label}</span>${html}</label>`;
+const inp = (id, ph='', type='text', val='') => `<input id="${id}" type="${type}" value="${esc(val)}" placeholder="${esc(ph)}" class="w-full mt-1 py-3 px-3">`;
+
+function sideToggle(active){
+  active = active || 'own';
+  const cls = (side) => active===side ? 'bg-green-600' : 'bg-[#262626]';
+  return `<input type="hidden" id="f_sideVal" value="${active}">
+  <div class="grid grid-cols-2 gap-2 mb-3">
+    <button type="button" data-side="own" class="btn sideBtn ${cls('own')} py-2.5 rounded-lg font-semibold text-sm">Eigen team</button>
+    <button type="button" data-side="opp" class="btn sideBtn ${cls('opp')} py-2.5 rounded-lg font-semibold text-sm">Tegenstander</button>
+  </div>`;
+}
+function playerOptions(teamId, selId, includeEmpty){
+  let o = includeEmpty ? `<option value="">— geen —</option>` : '';
+  o += teamPlayers(teamId).sort((a,b)=>(a.number||99)-(b.number||99))
+       .map(p => `<option value="${p.id}" ${p.id===selId?'selected':''}>${p.number!=null?'#'+p.number+' ':''}${esc(p.name)}</option>`).join('');
+  return o;
+}
+
+/* Goal-venster (herbruikt door de Goal-knop én de score-+). */
+function openGoalModal(active){
+  const t = currentTeam();
+  openModal(`Goal – ${liveMin()}'`,
+    sideToggle(active) +
+    `<div class="sideOwn ${active==='opp'?'hidden':''}">
+      ${field('Wie scoorde?', `<select id="f_scorer" class="w-full mt-1 py-3 px-3">${playerOptions(t.id)}</select>`)}
+      ${field('Assist (optioneel)', `<select id="f_assist" class="w-full mt-1 py-3 px-3">${playerOptions(t.id,null,true)}</select>`)}
+    </div>
+    <div class="sideOpp ${active==='opp'?'':'hidden'}">
+      ${field('Speler tegenstander (optioneel)', inp('f_oppname','Naam of rugnummer'))}
+    </div>`,
+    `<button data-act="saveGoal" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Goal opslaan</button>`);
+}
+
+// Welke kant (own/opp) hoort bij een score-kolom (home/away)?
+function columnSide(m, colSide){
+  const ourHome = m.homeAway !== 'Uit';
+  return ((colSide==='home') === ourHome) ? 'own' : 'opp';
+}
+
+/* ==================================================================
+   BINDING
+   ================================================================== */
+function bind(){
+  document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { if (b.dataset.nav!=='live') { stopTimer(); LIVE.matchId=null; } goto(b.dataset.nav); });
+  document.querySelectorAll('#teamSel').forEach(el => el.onchange = () => { PREFS.teamId = el.value; savePrefs(); render(); });
+  document.querySelectorAll('#seasonSel').forEach(el => el.onchange = () => { PREFS.seasonId = el.value; savePrefs(); render(); });
+  document.querySelectorAll('#logoInput').forEach(el => el.onchange = handleLogoFile);
+  app.querySelectorAll('[data-act]').forEach(b => b.onclick = () => handleAct(b.dataset.act, b.dataset));
+  app.querySelectorAll('[data-sort]').forEach(b => b.onclick = () => { PREFS.sortKey = b.dataset.sort; savePrefs(); render(); });
+}
+function bindModal(){
+  modalRoot.querySelectorAll('[data-act]').forEach(b => b.onclick = () => handleAct(b.dataset.act, b.dataset));
+  modalRoot.querySelectorAll('.sideBtn').forEach(b => b.onclick = () => {
+    const side = b.dataset.side;
+    const hid = document.getElementById('f_sideVal'); if (hid) hid.value = side;
+    modalRoot.querySelectorAll('.sideBtn').forEach(x => {
+      const on = x.dataset.side === side;
+      x.classList.toggle('bg-green-600', on); x.classList.toggle('bg-[#262626]', !on);
+    });
+    const own = modalRoot.querySelector('.sideOwn'), opp = modalRoot.querySelector('.sideOpp');
+    if (own) own.classList.toggle('hidden', side!=='own');
+    if (opp) opp.classList.toggle('hidden', side!=='opp');
+  });
+}
+function sideVal(){ const el=document.getElementById('f_sideVal'); return el?el.value:'own'; }
+
+async function handleAct(act, ds){
+  const t = currentTeam(), s = currentSeason();
+  switch(act){
+    case 'closeModal': return closeModal();
+    case 'gotoSettings': return goto('settings');
+
+    /* ----- Teams & seizoenen ----- */
+    case 'addTeam':
+      return openModal('Nieuw team', field('Teamnaam', inp('f_name','Bijv. Heren 1, O19')),
+        `<button data-act="saveTeam" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    case 'saveTeam': {
+      const name = document.getElementById('f_name').value.trim(); if (!name) return;
+      const team = { id: uid(), name }; DATA.teams.push(team); PREFS.teamId = team.id;
+      if (!DATA.seasons.length){ const yr = new Date().getFullYear(); const se = { id: uid(), name: `${yr}/${yr+1}` }; DATA.seasons.push(se); PREFS.seasonId = se.id; }
+      savePrefs(); closeModal(); return commit();
+    }
+    case 'renameTeam':
+      if (!t) return;
+      return openModal('Team hernoemen', field('Teamnaam', inp('f_name','','text', t.name)),
+        `<button data-act="saveRenameTeam" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    case 'saveRenameTeam': {
+      const name = document.getElementById('f_name').value.trim(); if (name && t) t.name = name;
+      closeModal(); return commit();
+    }
+    case 'addSeason':
+      return openModal('Nieuw seizoen', field('Seizoen', inp('f_name', 'Bijv. 2026/2027')),
+        `<button data-act="saveSeason" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    case 'saveSeason': {
+      const name = document.getElementById('f_name').value.trim(); if (!name) return;
+      const se = { id: uid(), name }; DATA.seasons.push(se); PREFS.seasonId = se.id; savePrefs(); closeModal(); return commit();
+    }
+
+    /* ----- Spelers & staf ----- */
+    case 'addPlayer':
+    case 'addStaff': {
+      const isStaff = act==='addStaff';
+      return openModal(isStaff?'Nieuw staflid':'Nieuwe speler',
+        field('Naam', inp('f_name','Voor- en achternaam')) +
+        (isStaff ? field('Rol', inp('f_pos','Bijv. Trainer, Leider, Verzorger'))
+                 : field('Rugnummer', inp('f_num','Bijv. 10','number')) +
+                   field('Positie', `<select id="f_pos" class="w-full mt-1 py-3 px-3">${['Keeper','Verdediger','Middenvelder','Aanvaller'].map(p=>`<option>${p}</option>`).join('')}</select>`)),
+        `<button data-act="savePlayer" data-staff="${isStaff?1:0}" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    }
+    case 'savePlayer': {
+      const name = document.getElementById('f_name').value.trim(); if (!name || !t) return;
+      const isStaff = ds.staff==='1'; const numEl = document.getElementById('f_num');
+      DATA.players.push({ id: uid(), teamId: t.id, name, isStaff,
+        number: (!isStaff && numEl && numEl.value!=='') ? parseInt(numEl.value) : null,
+        position: document.getElementById('f_pos').value.trim() });
+      closeModal(); return commit();
+    }
+    case 'bulkAdd':
+      return openModal('Meerdere toevoegen',
+        field('Type', `<select id="f_bulktype" class="w-full mt-1 py-3 px-3"><option value="player">Spelers</option><option value="staff">Staf</option></select>`) +
+        `<label class="block mb-2"><span class="text-sm text-neutral-400">Namen (één per regel)</span>
+          <textarea id="f_bulk" rows="8" placeholder="Jan Jansen&#10;Piet de Vries&#10;Kees Bakker" class="w-full mt-1 py-3 px-3"></textarea></label>
+         <p class="text-xs text-neutral-500">Alleen namen nodig. Rugnummer, positie of rol vul je daarna per persoon aan met het potloodje.</p>`,
+        `<button data-act="saveBulk" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Toevoegen</button>`);
+    case 'saveBulk': {
+      if (!t) return;
+      const isStaff = document.getElementById('f_bulktype').value === 'staff';
+      const names = document.getElementById('f_bulk').value.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
+      if (!names.length){ alert('Geen namen ingevuld.'); return; }
+      for (const name of names){
+        DATA.players.push({ id: uid(), teamId: t.id, name, isStaff, number: null, position: isStaff ? '' : '' });
+      }
+      closeModal(); alert(`${names.length} ${isStaff?'staflid(en)':'speler(s)'} toegevoegd.`); return commit();
+    }
+    case 'removeLogo': {
+      if (t){ delete t.logo; return commit(); }
+      return;
+    }
+    case 'editPlayer': {
+      const p = playerById(ds.id); if (!p) return;
+      if (p.isStaff){
+        return openModal('Staflid bewerken',
+          field('Naam', inp('f_name','','text', p.name)) + field('Rol', inp('f_pos','Bijv. Trainer','text', p.position||'')),
+          `<button data-act="updatePlayer" data-id="${p.id}" data-staff="1" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+      }
+      return openModal('Speler bewerken',
+        field('Naam', inp('f_name','',  'text', p.name)) + field('Rugnummer', inp('f_num','','number', p.number??'')) +
+        field('Positie', `<select id="f_pos" class="w-full mt-1 py-3 px-3">${['Keeper','Verdediger','Middenvelder','Aanvaller'].map(x=>`<option ${x===p.position?'selected':''}>${x}</option>`).join('')}</select>`),
+        `<button data-act="updatePlayer" data-id="${p.id}" data-staff="0" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    }
+    case 'updatePlayer': {
+      const p = playerById(ds.id); if (!p) return;
+      p.name = document.getElementById('f_name').value.trim() || p.name;
+      if (ds.staff==='1'){ p.position = document.getElementById('f_pos').value.trim(); }
+      else { const n = document.getElementById('f_num').value; p.number = n!==''?parseInt(n):null; p.position = document.getElementById('f_pos').value; }
+      closeModal(); return commit();
+    }
+    case 'delPlayer': {
+      const p = playerById(ds.id);
+      if (!confirm(`Weet je zeker dat je dit ${p&&p.isStaff?'staflid':'speler'} wilt verwijderen?`)) return;
+      DATA.players = DATA.players.filter(x => x.id !== ds.id); return commit();
+    }
+
+    /* ----- Wedstrijden ----- */
+    case 'addMatch': {
+      if (!s) { alert('Maak eerst een seizoen aan bij Instellingen.'); return; }
+      return openModal('Nieuwe wedstrijd',
+        field('Tegenstander', inp('f_opp','Bijv. Voorst 3')) +
+        `<div class="grid grid-cols-2 gap-2">${field('Datum', inp('f_date','','date', new Date().toISOString().slice(0,10)))}${field('Tijd', inp('f_time','','time','10:00'))}</div>` +
+        `<div class="grid grid-cols-2 gap-2">${field('Thuis/Uit', `<select id="f_ha" class="w-full mt-1 py-3 px-3"><option>Thuis</option><option>Uit</option></select>`)}${field('Type', `<select id="f_type" class="w-full mt-1 py-3 px-3"><option>Competitie</option><option>Beker</option><option>Oefen</option></select>`)}</div>`,
+        `<button data-act="saveMatch" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    }
+    case 'saveMatch': {
+      const opp = document.getElementById('f_opp').value.trim(); if (!opp) return;
+      DATA.matches.push({ id: uid(), teamId: t.id, seasonId: s.id, opponent: opp,
+        date: document.getElementById('f_date').value, time: document.getElementById('f_time').value,
+        homeAway: document.getElementById('f_ha').value, type: document.getElementById('f_type').value,
+        status: 'Gepland', homeScore: 0, awayScore: 0, length: 90, lineup: [], events: [] });
+      closeModal(); return commit();
+    }
+    case 'delMatch': {
+      if (!confirm('Weet je zeker dat je deze wedstrijd wilt verwijderen?')) return;
+      DATA.matches = DATA.matches.filter(m => m.id !== ds.id); return commit();
+    }
+    case 'editPlayed': {
+      if (!confirm('Weet je het zeker?')) return;
+      return handleAct('startLive', { id: ds.id });
+    }
+    case 'importICS':
+      return openModal('ICS-agenda importeren',
+        `<p class="text-sm text-neutral-400 mb-3">Kies een .ics-bestand. Wedstrijden worden aan het huidige team &amp; seizoen toegevoegd.</p>
+         <input id="f_ics" type="file" accept=".ics,text/calendar" class="w-full text-sm mb-2">
+         <p class="text-xs text-neutral-500">Tegenstander en thuis/uit worden zo goed mogelijk geraden uit de titel.</p>`,
+        `<button data-act="doImportICS" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Importeren</button>`);
+    case 'doImportICS': {
+      const f = document.getElementById('f_ics').files[0]; if (!f){ alert('Geen bestand gekozen.'); return; }
+      const evs = parseICS(await f.text()); if (!evs.length){ alert('Geen wedstrijden gevonden in dit bestand.'); return; }
+      let added = 0;
+      for (const ev of evs){
+        const g = guessOpponent(ev.summary);
+        DATA.matches.push({ id: uid(), teamId: t.id, seasonId: s.id, opponent: g.opponent, date: ev.date, time: ev.time,
+          homeAway: g.homeAway, type: 'Competitie', status: 'Gepland', homeScore: 0, awayScore: 0, length: 90, lineup: [], events: [] });
+        added++;
+      }
+      closeModal(); alert(`${added} wedstrijd(en) geïmporteerd.`); return commit();
+    }
+
+    /* ----- Live tracker ----- */
+    case 'startLive': {
+      const m = DATA.matches.find(x => x.id === ds.id); if (!m) return;
+      LIVE.matchId = m.id; LIVE.seconds = 0; LIVE.half = 1; stopTimer();
+      PREFS.teamId = m.teamId; PREFS.seasonId = m.seasonId; savePrefs();
+      return goto('live');
+    }
+    case 'closeLive': { stopTimer(); LIVE.matchId=null; return goto('agenda'); }
+
+    /* Score + : open Goal-venster voor het juiste team */
+    case 'goalPlus': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openGoalModal(columnSide(m, ds.side));
+    }
+    /* Score − : verwijder chronologisch laatste doelpunt van dat team */
+    case 'goalMinus': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      const side = columnSide(m, ds.side);              // 'own' | 'opp'
+      const scoreKey = ds.side==='home' ? 'homeScore' : 'awayScore';
+      for (let i = m.events.length-1; i>=0; i--){
+        if (m.events[i].type==='goal' && (m.events[i].team||'own')===side){ m.events.splice(i,1); break; }
+      }
+      m[scoreKey] = Math.max(0, (m[scoreKey]||0) - 1);
+      return commit();
+    }
+
+    case 'timerToggle': { LIVE.running ? stopTimer() : startTimer(); return render(); }
+    case 'timerPlus':  { LIVE.seconds += 60; return render(); }
+    case 'timerMinus': { LIVE.seconds = Math.max(0, LIVE.seconds-60); return render(); }
+    case 'firstHalf':  { LIVE.half = 1; LIVE.seconds = 0; stopTimer(); return render(); }
+    case 'secondHalf': { LIVE.half = 2; LIVE.seconds = HALF1_CAP; startTimer(); return render(); }
+
+    /* --- GOAL --- */
+    case 'logGoal': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openGoalModal('own');
+    }
+    case 'saveGoal': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      const opp = sideVal()==='opp'; const ourHome = m.homeAway!=='Uit';
+      if (opp){
+        m.events.push({ id: uid(), type:'goal', minute: liveMin(), team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null });
+        m[ourHome?'awayScore':'homeScore'] = (m[ourHome?'awayScore':'homeScore']||0)+1;
+      } else {
+        const scorer = document.getElementById('f_scorer').value;
+        const assist = document.getElementById('f_assist').value || null;
+        if (assist && assist===scorer){ alert('Een speler kan geen assist op zichzelf geven.'); return; }
+        m.events.push({ id: uid(), type:'goal', minute: liveMin(), team:'own', playerId: scorer, assistId: assist });
+        m[ourHome?'homeScore':'awayScore'] = (m[ourHome?'homeScore':'awayScore']||0)+1;
+      }
+      closeModal(); return commit();
+    }
+
+    /* --- KAART --- */
+    case 'logCard': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openModal(`Kaart – ${liveMin()}'`,
+        sideToggle('own') +
+        `<div class="sideOwn">${field('Speler', `<select id="f_pl" class="w-full mt-1 py-3 px-3">${playerOptions(t.id)}</select>`)}</div>
+         <div class="sideOpp hidden">${field('Speler tegenstander (optioneel)', inp('f_oppname','Naam of rugnummer'))}</div>` +
+        field('Type', `<div class="grid grid-cols-2 gap-2 mt-1">
+          <label class="btn card p-3 text-center cursor-pointer"><input type="radio" name="ct" value="Geel" checked class="hidden"><span>🟨 Gele kaart</span></label>
+          <label class="btn card p-3 text-center cursor-pointer"><input type="radio" name="ct" value="Rood" class="hidden"><span>🟥 Rode kaart</span></label>
+        </div>`),
+        `<button data-act="saveCard" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Kaart opslaan</button>`);
+    }
+    case 'saveCard': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      const ct = modalRoot.querySelector('input[name=ct]:checked').value;
+      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'card', minute: liveMin(), team:'opp', cardType: ct, oppName: document.getElementById('f_oppname').value.trim() || null }); }
+      else { m.events.push({ id: uid(), type:'card', minute: liveMin(), team:'own', cardType: ct, playerId: document.getElementById('f_pl').value }); }
+      closeModal(); return commit();
+    }
+
+    /* --- WISSEL --- */
+    case 'logSub': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openModal(`Wissel – ${liveMin()}'`,
+        sideToggle('own') +
+        `<div class="sideOwn">
+          ${field('Speler UIT (▼)', `<select id="f_out" class="w-full mt-1 py-3 px-3">${playerOptions(t.id)}</select>`)}
+          ${field('Speler IN (▲)', `<select id="f_in" class="w-full mt-1 py-3 px-3">${playerOptions(t.id)}</select>`)}
+        </div>
+        <div class="sideOpp hidden">${field('Toelichting tegenstander (optioneel)', inp('f_oppname','Bijv. #7 → #14'))}</div>`,
+        `<button data-act="saveSub" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Wissel opslaan</button>`);
+    }
+    case 'saveSub': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'sub', minute: liveMin(), team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null }); }
+      else {
+        const out = document.getElementById('f_out').value, inId = document.getElementById('f_in').value;
+        if (out===inId){ alert('Kies twee verschillende spelers.'); return; }
+        m.events.push({ id: uid(), type:'sub', minute: liveMin(), team:'own', playerOutId: out, playerInId: inId });
+      }
+      closeModal(); return commit();
+    }
+    case 'delEvent': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      m.events = m.events.filter(e => e.id !== ds.id); return commit();
+    }
+    case 'lineup': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      const players = teamPlayers(t.id).sort((a,b)=>(a.number||99)-(b.number||99));
+      return openModal('Opstelling (basisspelers)',
+        `<p class="text-sm text-neutral-400 mb-3">Vink de basisspelers aan. Speelminuten worden hiermee + de wissels berekend.</p>
+         <div class="space-y-2 max-h-[55vh] overflow-y-auto">
+         ${players.map(p => `<label class="btn card p-3 flex items-center gap-3 cursor-pointer">
+           <input type="checkbox" class="lu w-5 h-5" value="${p.id}" ${(m.lineup||[]).includes(p.id)?'checked':''}>
+           <span class="w-7 text-center text-green-400 font-bold">${p.number??'–'}</span>
+           <span class="flex-1">${esc(p.name)}</span><span class="text-xs text-neutral-500">${esc(p.position||'')}</span></label>`).join('')||'<div class="text-neutral-500 text-sm">Geen spelers.</div>'}
+         </div>`,
+        `<button data-act="saveLineup" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Opstelling opslaan</button>`);
+    }
+    case 'saveLineup': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      m.lineup = [...modalRoot.querySelectorAll('.lu:checked')].map(c => c.value); closeModal(); return commit();
+    }
+    case 'finishMatch': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      if (m.status !== 'Gespeeld'){ m.status = 'Gespeeld'; m.playedSeconds = LIVE.seconds; if (LIVE.seconds > 0) m.length = Math.round(LIVE.seconds/60); stopTimer(); }
+      else { m.status = 'Gepland'; }
+      return commit();
+    }
+    case 'shotTimeline': return shotTimeline();
+
+    /* ----- Export / backup ----- */
+    case 'exportCSV': return exportCSV(t, s);
+    case 'printTable': return printOrShot(document.getElementById('printArea'), `statistieken_${t.name}_${s.name}`);
+    case 'exportData': {
+      const stamp = new Date().toISOString().slice(0,10);
+      downloadBlob(new Blob([JSON.stringify(DATA,null,2)], {type:'application/json'}), `teamstats-backup_${stamp}.json`);
+      return;
+    }
+    case 'importData':
+      return openModal('Data importeren',
+        `<p class="text-sm text-neutral-400 mb-3"><b class="text-red-400">Let op:</b> dit vervangt ál je huidige data door de inhoud van het back-upbestand.</p>
+         <input id="f_backup" type="file" accept=".json,application/json" class="w-full text-sm">`,
+        `<button data-act="doImportData" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Importeren en vervangen</button>`);
+    case 'doImportData': {
+      const f = document.getElementById('f_backup').files[0]; if (!f){ alert('Geen bestand gekozen.'); return; }
+      let parsed; try { parsed = JSON.parse(await f.text()); } catch(e){ alert('Ongeldig bestand (geen geldige JSON).'); return; }
+      if (!parsed || !Array.isArray(parsed.teams) || !Array.isArray(parsed.seasons) || !Array.isArray(parsed.players) || !Array.isArray(parsed.matches)){
+        alert('Dit lijkt geen geldig TeamStats back-upbestand.'); return;
+      }
+      if (!confirm('Weet je zeker dat je de huidige data wilt vervangen?')) return;
+      DATA = parsed;
+      PREFS.teamId = DATA.teams[0]?.id; PREFS.seasonId = DATA.seasons[0]?.id; savePrefs();
+      closeModal(); alert('Data geïmporteerd.'); return commit();
+    }
+  }
+}
+
+/* ---------- Timer (per seconde) ---------- */
+function startTimer(){
+  LIVE.running = true;
+  if (LIVE.timer) clearInterval(LIVE.timer);
+  LIVE.timer = setInterval(() => {
+    LIVE.seconds++;
+    const el = document.getElementById('timerDisplay');
+    if (el) el.innerHTML = timerHTML();
+  }, 1000);
+}
+function stopTimer(){ LIVE.running = false; if (LIVE.timer){ clearInterval(LIVE.timer); LIVE.timer = null; } }
+
+/* ---------- CSV export ---------- */
+function exportCSV(t, s){
+  const rows = computeStats(t.id, s.id).sort((a,b)=>b.goals-a.goals);
+  const head = ['Speler','Rugnummer','Positie','Gespeeld','Basisplaatsen','Wisselbeurten','Goals','Assists','Geel','Rood','Speelminuten'];
+  const lines = [head.join(';')];
+  for (const r of rows){
+    lines.push([r.name, r.number??'', r.position||'', r.gp, r.starts, r.subIn, r.goals, r.assists, r.yellow, r.red, r.minutes]
+      .map(v => `"${String(v).replace(/"/g,'""')}"`).join(';'));
+  }
+  downloadBlob(new Blob(['﻿'+lines.join('\n')], { type:'text/csv;charset=utf-8;' }), safe(`statistieken_${t.name}_${s.name}`)+'.csv');
+}
+
+/* ---------- Screenshot / print ---------- */
+function printOrShot(el, name){
+  if (window.html2canvas && el){
+    html2canvas(el, { backgroundColor:'#171717', scale:2 }).then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'))).catch(() => window.print());
+  } else { window.print(); }
+}
+function shotTimeline(){
+  const el = document.getElementById('timelineArea');
+  const m = DATA.matches.find(x => x.id === LIVE.matchId);
+  const name = m ? `verloop_${matchTitle(m)}_${m.date}` : 'wedstrijdverloop';
+  if (window.html2canvas && el){
+    html2canvas(el, { backgroundColor:'#171717', scale:2 }).then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'))).catch(() => alert('Screenshot maken lukte niet in deze weergave. Open de app in een browsertabblad.'));
+  } else { alert('Screenshot maken vereist internet (voor html2canvas). Open de app in een browsertabblad.'); }
+}
+function safe(n){ return String(n).replace(/[^\w.\-]+/g,'_'); }
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+/* ==================================================================
+   OPSTARTEN
+   ================================================================== */
+function showSetupBanner(){
+  if (FIREBASE_READY) return;
+  const b = document.createElement('div');
+  b.className = 'bg-red-900 text-red-100 text-xs text-center px-3 py-2';
+  b.innerHTML = '⚠ Firebase nog niet ingesteld — plak je config bovenin de code (zoek op <b>PLAK_HIER</b>). De app werkt nu lokaal op dit toestel.';
+  document.body.prepend(b);
+}
+async function boot(){
+  showSetupBanner();
+  DATA = await Database.load();
+  Database.subscribe((newData) => { DATA = newData; render(); });
+  render();
+}
+boot();
+</script>
+</body>
+</html>
