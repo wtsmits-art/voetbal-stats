@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>TeamStats – Voetbalstatistieken</title>
+<link id="appFavicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⚽%3C/text%3E%3C/svg%3E">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <!-- Firebase (compat) – voor live delen tussen telefoons -->
@@ -247,14 +248,24 @@ function parseICS(text){
   }).filter(e => e.date);
 }
 function guessOpponent(summary){
-  const us = (currentTeam()?.name || '').toLowerCase();
-  const parts = summary.split(/\s[-–vs]+\s/i);
-  if (parts.length === 2){
-    const [a,b] = parts.map(s => s.trim());
-    if (us && b.toLowerCase().includes(us.split(' ')[0])) return { opponent:a, homeAway:'Uit' };
-    return { opponent:b, homeAway:'Thuis' };
+  /* ICS-titels zijn altijd "X - A". Alleen importwaarden gebruiken.
+     Komt X overeen met actief team → Thuis (tegenstander = A).
+     Komt A overeen met actief team → Uit  (tegenstander = X). */
+  const us = (currentTeam()?.name || '').trim().toLowerCase();
+  const parts = summary.split(/\s[-–—]+\s/).map(s => s.trim()).filter(Boolean);
+  if (parts.length >= 2){
+    const left = parts[0], right = parts[parts.length - 1];
+    const match = (side) => {
+      if (!us) return false;
+      const s = side.toLowerCase();
+      return s === us || s.includes(us) || us.includes(s);
+    };
+    if (match(left)) return { opponent: right, homeAway: 'Thuis' };
+    if (match(right)) return { opponent: left, homeAway: 'Uit' };
+    // Geen match met actief team: neem rechterkant als tegenstander, thuis
+    return { opponent: right, homeAway: 'Thuis' };
   }
-  return { opponent: summary.trim(), homeAway:'Thuis' };
+  return { opponent: summary.trim(), homeAway: 'Thuis' };
 }
 
 /* ==================================================================
@@ -321,6 +332,15 @@ function renderTopLogo(){
   const t = currentTeam();
   el.innerHTML = (t && t.logo && view()!=='dashboard')
     ? `<img src="${t.logo}" alt="logo" class="w-9 h-9 rounded-lg object-cover border border-[#333] bg-[#171717]">` : '';
+  updateFavicon();
+}
+const DEFAULT_FAVICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⚽%3C/text%3E%3C/svg%3E";
+function updateFavicon(){
+  const link = document.getElementById('appFavicon') || (() => {
+    const l = document.createElement('link'); l.id = 'appFavicon'; l.rel = 'icon'; document.head.appendChild(l); return l;
+  })();
+  const t = currentTeam();
+  link.href = (t && t.logo) ? t.logo : DEFAULT_FAVICON;
 }
 // Verklein een geüploade afbeelding naar max 256px en geef een data-URL terug.
 function resizeImage(file, max, cb){
@@ -729,7 +749,7 @@ function columnSide(m, colSide){
    BINDING
    ================================================================== */
 function bind(){
-  document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { if (b.dataset.nav!=='live') { stopTimer(); LIVE.matchId=null; } goto(b.dataset.nav); });
+  document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { goto(b.dataset.nav); });
   document.querySelectorAll('#teamSel').forEach(el => el.onchange = () => { PREFS.teamId = el.value; savePrefs(); render(); });
   document.querySelectorAll('#seasonSel').forEach(el => el.onchange = () => { PREFS.seasonId = el.value; savePrefs(); render(); });
   document.querySelectorAll('#logoInput').forEach(el => el.onchange = handleLogoFile);
@@ -896,11 +916,17 @@ async function handleAct(act, ds){
     /* ----- Live tracker ----- */
     case 'startLive': {
       const m = DATA.matches.find(x => x.id === ds.id); if (!m) return;
-      LIVE.matchId = m.id; LIVE.seconds = 0; LIVE.half = 1; stopTimer();
+      // Zelfde wedstrijd al live? Timer/state behouden. Anders opnieuw starten.
+      if (LIVE.matchId !== m.id){
+        LIVE.matchId = m.id; LIVE.seconds = 0; LIVE.half = 1; stopTimer();
+      }
       PREFS.teamId = m.teamId; PREFS.seasonId = m.seasonId; savePrefs();
       return goto('live');
     }
-    case 'closeLive': { stopTimer(); LIVE.matchId=null; return goto('agenda'); }
+    case 'closeLive': {
+      // Alleen de pagina verlaten; timer blijft lopen tot pauze of afronden
+      return goto('agenda');
+    }
 
     /* Score + : open Goal-venster voor het juiste team */
     case 'goalPlus': {
