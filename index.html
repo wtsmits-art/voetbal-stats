@@ -73,6 +73,9 @@ const CLUB_DOC = "teamstats-club";       // 1 gedeeld document voor de hele club
 // Firebase is "klaar" zodra je de config hebt ingevuld (geen PLAK_HIER meer).
 const FIREBASE_READY = !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.includes("PLAK_HIER"));
 
+// Firebase is "klaar" zodra je de config hebt ingevuld (geen PLAK_HIER meer).
+const FIREBASE_READY = !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.includes("PLAK_HIER"));
+
 /* ==================================================================
    DATABASE HELPER  –  het ENIGE stuk dat je hoeft te vervangen
    ================================================================== */
@@ -246,25 +249,45 @@ function parseICS(text){
     return { summary: ev.summary || 'Wedstrijd', date, time: time || '10:00' };
   }).filter(e => e.date);
 }
+function normTeam(s){
+  /* Vergelijk teamnamen robuust: "S.V. loil 2" ≈ "sv Loil 2" ≈ "SV Loil-2" */
+  return String(s||'').toLowerCase()
+    .replace(/\(.*?\)/g, ' ')   // strip (10:00u) e.d.
+    .replace(/[^a-z0-9]+/g, '')   // alleen letters/cijfers
+    .trim();
+}
+function cleanSide(s){
+  /* Haal tijd/suffix uit een kant van de titel, behoud leesbare naam */
+  return String(s||'').replace(/\s*\(.*?\)\s*$/g, '').trim();
+}
 function guessOpponent(summary){
   /* ICS-titels zijn altijd "X - A". Alleen importwaarden gebruiken.
      Komt X overeen met actief team → Thuis (tegenstander = A).
-     Komt A overeen met actief team → Uit  (tegenstander = X). */
-  const us = (currentTeam()?.name || '').trim().toLowerCase();
-  const parts = summary.split(/\s[-–—]+\s/).map(s => s.trim()).filter(Boolean);
+     Komt A overeen met actief team → Uit  (tegenstander = X).
+     Eigen teamnaam nooit zelf toevoegen of als tegenstander opslaan. */
+  const usNorm = normTeam(currentTeam()?.name || '');
+  // Split op streepjes / vs (met of zonder spaties)
+  const parts = summary.split(/\s*[-–—]+\s*|\s+vs\.?\s+/i).map(s => s.trim()).filter(Boolean);
   if (parts.length >= 2){
-    const left = parts[0], right = parts[parts.length - 1];
+    const left = cleanSide(parts[0]);
+    const right = cleanSide(parts[parts.length - 1]);
     const match = (side) => {
-      if (!us) return false;
-      const s = side.toLowerCase();
-      return s === us || s.includes(us) || us.includes(s);
+      if (!usNorm) return false;
+      const n = normTeam(side);
+      if (!n) return false;
+      return n === usNorm || n.includes(usNorm) || usNorm.includes(n);
     };
-    if (match(left)) return { opponent: right, homeAway: 'Thuis' };
-    if (match(right)) return { opponent: left, homeAway: 'Uit' };
-    // Geen match met actief team: neem rechterkant als tegenstander, thuis
+    if (match(left) && !match(right)) return { opponent: right, homeAway: 'Thuis' };
+    if (match(right) && !match(left)) return { opponent: left, homeAway: 'Uit' };
+    // Beide of geen match: niet raden met eigen team — gebruik rechts als tegenstander
+    if (match(left) && match(right)) {
+      // Bijv. "sv Loil 2 - S.V. loil 2": kies de kant die het minst exact is als opponent
+      return { opponent: right, homeAway: 'Thuis' };
+    }
     return { opponent: right, homeAway: 'Thuis' };
   }
-  return { opponent: summary.trim(), homeAway: 'Thuis' };
+  // Geen "X - A": hele summary als tegenstander (zonder eigen team ervoor te plakken)
+  return { opponent: cleanSide(summary), homeAway: 'Thuis' };
 }
 
 /* ==================================================================
@@ -1137,4 +1160,3 @@ boot();
 </script>
 </body>
 </html>
-
