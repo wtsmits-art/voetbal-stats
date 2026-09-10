@@ -70,7 +70,6 @@ const FIREBASE_CONFIG = {
   appId:             "1:702420588463:web:841c4e97d6dbd12a47815a"
 };
 const CLUB_DOC = "teamstats-club";       // 1 gedeeld document voor de hele club
-
 // Firebase is "klaar" zodra je de config hebt ingevuld (geen PLAK_HIER meer).
 const FIREBASE_READY = !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.includes("PLAK_HIER"));
 
@@ -430,8 +429,9 @@ function dashboardView(t, s){
 
 /* ---------- 2. SPELERS / STAF ---------- */
 function playersView(t){
-  const players = teamPlayers(t.id).sort((a,b)=>(a.number||99)-(b.number||99));
-  const staff = teamStaff(t.id);
+  const byName = (a,b) => (a.name||'').localeCompare(b.name||'','nl',{sensitivity:'base'});
+  const players = teamPlayers(t.id).sort(byName);
+  const staff = teamStaff(t.id).sort(byName);
   const row = p => `<div class="card p-3 flex items-center gap-3">
       <div class="w-9 h-9 rounded-full bg-green-600/20 text-green-400 font-bold flex items-center justify-center flex-none">${p.number ?? '–'}</div>
       <div class="flex-1 min-w-0"><div class="font-semibold truncate">${esc(p.name)}</div><div class="text-neutral-400 text-xs">${esc(p.position||'—')}</div></div>
@@ -1137,3 +1137,4 @@ boot();
 </script>
 </body>
 </html>
+
