@@ -1,0 +1,1784 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TeamStats – Voetbalstatistieken</title>
+<link id="appFavicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⚽%3C/text%3E%3C/svg%3E">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<!-- Firebase (compat) – voor live delen tussen telefoons -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<style>
+  html,body{background:#0a0a0a;color:#fff;-webkit-tap-highlight-color:transparent;}
+  ::-webkit-scrollbar{width:0;height:0;}
+  .card{background:#171717;border:1px solid #262626;border-radius:16px;}
+  .btn{transition:transform .05s ease, background .15s ease;}
+  .btn:active{transform:scale(.97);}
+  input,select,textarea{background:#262626;border:1px solid #3a3a3a;color:#fff;border-radius:10px;}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:#22c55e;}
+  textarea::placeholder,input::placeholder{color:#737373;}
+  select option{background:#262626;}
+  .tl-dot{width:10px;height:10px;border-radius:50%;flex:none;margin-top:5px;}
+
+  /* Voetbalveld (CSS) */
+  .pitch{
+    background:
+      radial-gradient(circle at 50% 50%, rgba(255,255,255,.10) 0 2px, transparent 3px),
+      repeating-linear-gradient(0deg,#166534 0 28px,#15803d 28px 56px);
+    border:2px solid rgba(255,255,255,.55); border-radius:14px; position:relative; overflow:hidden;
+  }
+  .pitch::before{content:"";position:absolute;left:8%;right:8%;top:50%;height:0;border-top:2px solid rgba(255,255,255,.45);pointer-events:none;}
+  .pitch::after{content:"";position:absolute;left:50%;top:50%;width:64px;height:64px;transform:translate(-50%,-50%);border:2px solid rgba(255,255,255,.45);border-radius:50%;pointer-events:none;}
+  .pitch .lchip{z-index:2;}
+  .chip{min-height:44px;touch-action:none;}
+  .chip:active{transform:scale(1.06);}
+  .drag-ghost{opacity:.35;}
+  .drag-chosen{box-shadow:0 0 0 3px #22c55e;}
+
+  /* Licht thema (optioneel, per toestel) */
+  html.light body{background:#f4f5f7 !important;color:#111 !important;}
+  html.light .card{background:#ffffff !important;border-color:#e5e7eb !important;}
+  html.light .bg-\[\#171717\]{background:#ffffff !important;}
+  html.light .bg-\[\#111\]{background:#ffffff !important;}
+  html.light .bg-\[\#262626\]{background:#eef0f3 !important;}
+  html.light input,html.light select,html.light textarea{background:#eef0f3 !important;color:#111 !important;border-color:#d5d8dd !important;}
+  html.light select option{background:#fff !important;}
+  html.light .text-neutral-400{color:#5b616e !important;}
+  html.light .text-neutral-500{color:#6b7280 !important;}
+  html.light .text-neutral-300,html.light .text-neutral-200{color:#374151 !important;}
+  html.light .text-white{color:#111 !important;}
+  html.light .border-\[\#262626\],html.light .border-\[\#333\],html.light .border-\[\#222\],html.light .border-t{border-color:#e5e7eb !important;}
+
+  @media print{
+    body *{visibility:hidden;}
+    #printArea, #printArea *{visibility:visible;}
+    #printArea{position:absolute;left:0;top:0;width:100%;color:#000;background:#fff;}
+    #printArea table{color:#000;}
+  }
+</style>
+</head>
+<body class="max-w-lg mx-auto pb-24 select-none">
+
+<!-- Klein teamlogo rechtsboven (op elke pagina, behalve Overzicht waar het naast de naam staat) -->
+<div class="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-lg z-30 pointer-events-none"><div id="topLogo" class="absolute top-2 right-2"></div></div>
+
+<div id="app"></div>
+
+<nav id="bottomnav" class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-lg bg-[#111] border-t border-[#262626] grid grid-cols-6 z-40"></nav>
+
+<div id="modalRoot"></div>
+
+<script>
+/* ==================================================================
+   TeamStats – amateur football statistics
+   ------------------------------------------------------------------
+   Alle data-toegang loopt via het Database-object hieronder.
+   Nu: LocalStorage. Straks: Firebase (zie de instructies in je project).
+   Je hoeft NERGENS anders in de code iets te veranderen om over te
+   stappen — alleen de methodes van Database vervangen.
+   ================================================================== */
+
+/* ==================================================================
+   >>> STAP 1: PLAK HIER JE FIREBASE-CONFIG <<<
+   ------------------------------------------------------------------
+   Vervang alle "PLAK_HIER"-waarden hieronder door je eigen gegevens
+   uit de Firebase-console (Projectinstellingen -> Je apps -> Web-app
+   -> SDK setup and configuration -> "Config"). Meer hoef je NIET te
+   doen: de rest van de code staat al klaar.
+
+   Zolang hier nog "PLAK_HIER" staat, werkt de app gewoon LOKAAL
+   (zoals de originele versie) en zie je bovenin een rode balk.
+   ================================================================== */
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyCad3yioWqlE2C1iLrPcaksV4WZr8c0u74",
+  authDomain:        "teamstats-voetbal.firebaseapp.com",
+  projectId:         "teamstats-voetbal",
+  storageBucket:     "teamstats-voetbal.firebasestorage.app",
+  messagingSenderId: "702420588463",
+  appId:             "1:702420588463:web:841c4e97d6dbd12a47815a"
+};
+const CLUB_DOC = "teamstats-club";       // 1 gedeeld document voor de hele club
+// Firebase is "klaar" zodra je de config hebt ingevuld (geen PLAK_HIER meer).
+const FIREBASE_READY = !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.includes("PLAK_HIER"));
+
+/* ==================================================================
+   DATABASE HELPER  –  het ENIGE stuk dat je hoeft te vervangen
+   ================================================================== */
+const STORAGE_KEY = "teamstats_data_v1";
+const emptyData = () => ({ teams: [], seasons: [], players: [], matches: [] });
+
+let db = null;   // wordt de Firestore-verbinding zodra de config klopt
+
+const Database = {
+  async load() {
+    if (db){
+      const doc = await db.collection("clubs").doc(CLUB_DOC).get();
+      return doc.exists ? doc.data() : emptyData();
+    }
+    try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : emptyData(); }
+    catch (e) { return emptyData(); }
+  },
+  async save(data) {
+    if (db){ await db.collection("clubs").doc(CLUB_DOC).set(data); return; }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  },
+  subscribe(cb) {
+    if (db){
+      db.collection("clubs").doc(CLUB_DOC).onSnapshot((doc) => { if (doc.exists) cb(doc.data()); });
+      return;
+    }
+    window.addEventListener("storage", (e) => {
+      if (e.key === STORAGE_KEY && e.newValue) { try { cb(JSON.parse(e.newValue)); } catch (err) {} }
+    });
+  }
+};
+
+let auth = null;   // Firebase Authentication
+
+// Firebase opstarten zodra de config is ingevuld.
+if (FIREBASE_READY && typeof firebase !== 'undefined') {
+  try { firebase.initializeApp(FIREBASE_CONFIG); db = firebase.firestore(); auth = firebase.auth(); }
+  catch (e) { console.error('Firebase-init mislukt:', e); db = null; auth = null; }
+}
+
+/* ==================================================================
+   AUTH & ROLLEN
+   ------------------------------------------------------------------
+   - Ingelogde gebruiker krijgt automatisch een doc users/{uid} met
+     rol 'viewer'. De ALLEREERSTE admin zet je zelf op 'admin' via de
+     Firebase Console (collectie users -> jouw document -> role: admin).
+   - 'admin' mag alles bewerken; 'viewer' mag alleen bekijken.
+   - Lokaal (geen Firebase-config) mag alles, zoals de losse versie.
+   ================================================================== */
+let CURRENT_USER = null;         // firebase auth user
+let USER_ROLE = null;            // 'admin' | 'viewer'
+let USER_NAME = null;            // gekozen gebruikersnaam
+let MEMBERS = [];                // cache van de ledenlijst (voor admin)
+let MEMBERS_LOADED = false;
+
+const isAdmin = () => USER_ROLE === 'admin';
+const canEdit = () => !FIREBASE_READY || isAdmin();   // wie mag data wijzigen
+
+// >>> TEAMWACHTWOORD: pas dit aan naar jullie eigen woord (min. 6 tekens) <<<
+const TEAM_PASSWORD = "svloil2";
+// Domein voor de "fake e-mail" truc: gebruikersnaam -> naam@onsteam.local
+const TEAM_EMAIL_DOMAIN = "onsteam.local";
+// Maak van een gebruikersnaam een geldig, uniek e-mailadres (kleine letters, geen spaties).
+function usernameToEmail(username){
+  const clean = String(username||'').toLowerCase().trim()
+    .replace(/\s+/g,'')                 // spaties weg
+    .replace(/[^a-z0-9._-]/g,'');       // alleen veilige tekens
+  return { clean, email: clean ? `${clean}@${TEAM_EMAIL_DOMAIN}` : '' };
+}
+// Haal de gebruikersnaam terug uit een fake-email (voor weergave).
+function emailToUsername(email){ return String(email||'').split('@')[0] || ''; }
+
+// Zorg dat er een users/{uid}-document bestaat; geef {role, username} terug.
+// Bij een NIEUW account slaan we de gekozen gebruikersnaam + rol 'viewer' op.
+async function ensureUserDoc(user, username){
+  const ref = db.collection('users').doc(user.uid);
+  const snap = await ref.get();
+  if (!snap.exists){
+    const uname = username || emailToUsername(user.email);
+    await ref.set({ username: uname, role: 'viewer', createdAt: Date.now() });
+    return { role: 'viewer', username: uname };
+  }
+  const d = snap.data();
+  return { role: d.role || 'viewer', username: d.username || emailToUsername(user.email) };
+}
+
+/* ==================================================================
+   STATE
+   ================================================================== */
+let DATA = emptyData();
+
+const PREFS_KEY = "teamstats_prefs_v1";
+let PREFS = (() => {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; }
+  catch (e) { return {}; }
+})();
+function savePrefs(){ localStorage.setItem(PREFS_KEY, JSON.stringify(PREFS)); }
+function applyTheme(){ document.documentElement.classList.toggle('light', PREFS.theme === 'light'); }
+
+/* Live-wedstrijd timer. We tellen in SECONDEN op de wedstrijdklok.
+   half 1: 0..2700 = 00:00..45:00, daarna blessuretijd.
+   half 2: 2700..5400 = 45:00..90:00, daarna blessuretijd. */
+let LIVE = { matchId: null, seconds: 0, half: 1, running: false, timer: null };
+
+const HALF1_CAP = 45*60, HALF2_CAP = 90*60;
+function timerCap(){ return LIVE.half===1 ? HALF1_CAP : HALF2_CAP; }
+function timerParts(){
+  const cap = timerCap();
+  return { reg: Math.min(LIVE.seconds, cap), stop: Math.max(0, LIVE.seconds - cap) };
+}
+// Gelogde minuut (incl. blessuretijd: 45:00 [+02:15] -> minuut 47)
+const liveMin = () => {
+  const cap = timerCap();
+  if (LIVE.seconds <= cap) return Math.floor(LIVE.seconds/60);
+  return (cap/60) + Math.floor((LIVE.seconds - cap)/60);
+};
+const fmtTime = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+function timerHTML(){
+  const { reg, stop } = timerParts();
+  return fmtTime(reg) + (stop>0 ? ` <span class="text-red-500">[+${fmtTime(stop)}]</span>` : '');
+}
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+async function commit() {
+  if (!canEdit()){ alert('Alleen een admin kan wijzigingen opslaan.'); render(); return; }
+  try { await Database.save(DATA); }
+  catch (e) { console.error(e); alert('Opslaan mislukt (mogelijk geen rechten).'); }
+  render();
+}
+
+/* ==================================================================
+   HELPERS
+   ================================================================== */
+function currentTeam(){ return DATA.teams.find(t => t.id === PREFS.teamId) || DATA.teams[0] || null; }
+function currentSeason(){ return DATA.seasons.find(s => s.id === PREFS.seasonId) || DATA.seasons[0] || null; }
+function teamPlayers(teamId){ return DATA.players.filter(p => p.teamId === teamId && !p.isStaff); }
+function teamStaff(teamId){ return DATA.players.filter(p => p.teamId === teamId && p.isStaff); }
+function playerById(id){ return DATA.players.find(p => p.id === id); }
+function seasonMatches(teamId, seasonId){
+  return DATA.matches
+    .filter(m => m.teamId === teamId && m.seasonId === seasonId)
+    .sort((a,b) => (a.date+a.time).localeCompare(b.date+b.time));
+}
+// "gele" / "rode" (correcte spelling)
+const cardAdj = (ct) => ct==='Rood' ? 'rode' : 'gele';
+
+function playerMinutes(match, playerId){
+  const L = match.length || 90;
+  const subs = (match.events||[]).filter(e => e.type==='sub' && e.team!=='opp').sort((a,b)=>a.minute-b.minute);
+  const isStarter = (match.lineup||[]).includes(playerId);
+  let onFrom = isStarter ? 0 : null;
+  let total = 0;
+  for (const s of subs){
+    if (s.playerOutId === playerId && onFrom !== null){ total += s.minute - onFrom; onFrom = null; }
+    if (s.playerInId  === playerId && onFrom === null){ onFrom = s.minute; }
+  }
+  const red = (match.events||[]).find(e => e.type==='card' && e.cardType==='Rood' && e.playerId===playerId && e.team!=='opp');
+  let endCap = L;
+  if (red) endCap = Math.min(endCap, red.minute);
+  if (onFrom !== null) total += Math.max(0, endCap - onFrom);
+  return Math.max(0, Math.round(total));
+}
+function playerPlayed(match, playerId){
+  return (match.lineup||[]).includes(playerId) ||
+         (match.events||[]).some(e => e.type==='sub' && e.team!=='opp' && e.playerInId===playerId);
+}
+function computeStats(teamId, seasonId){
+  const played = seasonMatches(teamId, seasonId).filter(m => m.status === 'Gespeeld');
+  return teamPlayers(teamId).map(p => {
+    let gp=0, starts=0, subIn=0, goals=0, assists=0, yellow=0, red=0, minutes=0;
+    for (const m of played){
+      if (playerPlayed(m, p.id)) gp++;
+      if ((m.lineup||[]).includes(p.id)) starts++;
+      if ((m.events||[]).some(e => e.type==='sub' && e.team!=='opp' && e.playerInId===p.id)) subIn++;
+      minutes += playerMinutes(m, p.id);
+      for (const e of (m.events||[])){
+        if (e.team === 'opp') continue;
+        if (e.type==='goal' && e.playerId===p.id) goals++;
+        if (e.type==='goal' && e.assistId===p.id) assists++;
+        if (e.type==='card' && e.playerId===p.id && e.cardType==='Geel') yellow++;
+        if (e.type==='card' && e.playerId===p.id && e.cardType==='Rood') red++;
+      }
+    }
+    return { id:p.id, name:p.name, number:p.number, position:p.position, gp, starts, subIn, goals, assists, yellow, red, minutes };
+  });
+}
+function nextMatch(teamId, seasonId){
+  const today = new Date().toISOString().slice(0,10);
+  return seasonMatches(teamId, seasonId).filter(m => m.status !== 'Gespeeld' && m.date >= today)[0]
+    || seasonMatches(teamId, seasonId).filter(m => m.status !== 'Gespeeld')[0] || null;
+}
+function matchTitle(m){
+  const opp = m.opponent || 'Tegenstander';
+  const us = currentTeam() ? currentTeam().name : 'Ons team';
+  return m.homeAway === 'Uit' ? `${opp} - ${us}` : `${us} - ${opp}`;
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ==================================================================
+   ICS PARSER
+   ================================================================== */
+function parseICS(text){
+  const lines = text.replace(/\r\n/g,'\n').replace(/\n[ \t]/g,'').split('\n');
+  const events = []; let cur = null;
+  for (const line of lines){
+    if (line.startsWith('BEGIN:VEVENT')) cur = {};
+    else if (line.startsWith('END:VEVENT')){ if (cur) events.push(cur); cur = null; }
+    else if (cur){
+      const idx = line.indexOf(':'); if (idx === -1) continue;
+      const key = line.slice(0, idx).split(';')[0].toUpperCase();
+      const val = line.slice(idx+1).trim();
+      if (key === 'SUMMARY') cur.summary = val;
+      if (key === 'DTSTART') cur.dtstart = val;
+    }
+  }
+  return events.map(ev => {
+    const dt = (ev.dtstart||'').replace(/[^0-9TZ]/g,'');
+    let date='', time='';
+    if (dt.length >= 8){
+      date = `${dt.slice(0,4)}-${dt.slice(4,6)}-${dt.slice(6,8)}`;
+      const tIdx = dt.indexOf('T');
+      if (tIdx !== -1 && dt.length >= tIdx+5) time = `${dt.slice(tIdx+1,tIdx+3)}:${dt.slice(tIdx+3,tIdx+5)}`;
+    }
+    return { summary: ev.summary || 'Wedstrijd', date, time: time || '10:00' };
+  }).filter(e => e.date);
+}
+function normTeam(s){
+  /* Vergelijk teamnamen robuust: "S.V. loil 2" ≈ "sv Loil 2" ≈ "SV Loil-2" */
+  return String(s||'').toLowerCase()
+    .replace(/\(.*?\)/g, ' ')   // strip (10:00u) e.d.
+    .replace(/[^a-z0-9]+/g, '')   // alleen letters/cijfers
+    .trim();
+}
+function cleanSide(s){
+  /* Haal tijd/suffix uit een kant van de titel, behoud leesbare naam */
+  return String(s||'').replace(/\s*\(.*?\)\s*$/g, '').trim();
+}
+function guessOpponent(summary){
+  /* ICS-titels zijn altijd "X - A". Alleen importwaarden gebruiken.
+     Komt X overeen met actief team → Thuis (tegenstander = A).
+     Komt A overeen met actief team → Uit  (tegenstander = X).
+     Eigen teamnaam nooit zelf toevoegen of als tegenstander opslaan. */
+  const usNorm = normTeam(currentTeam()?.name || '');
+  // Split op streepjes / vs (met of zonder spaties)
+  const parts = summary.split(/\s*[-–—]+\s*|\s+vs\.?\s+/i).map(s => s.trim()).filter(Boolean);
+  if (parts.length >= 2){
+    const left = cleanSide(parts[0]);
+    const right = cleanSide(parts[parts.length - 1]);
+    const match = (side) => {
+      if (!usNorm) return false;
+      const n = normTeam(side);
+      if (!n) return false;
+      return n === usNorm || n.includes(usNorm) || usNorm.includes(n);
+    };
+    if (match(left) && !match(right)) return { opponent: right, homeAway: 'Thuis' };
+    if (match(right) && !match(left)) return { opponent: left, homeAway: 'Uit' };
+    // Beide of geen match: niet raden met eigen team — gebruik rechts als tegenstander
+    if (match(left) && match(right)) {
+      // Bijv. "sv Loil 2 - S.V. loil 2": kies de kant die het minst exact is als opponent
+      return { opponent: right, homeAway: 'Thuis' };
+    }
+    return { opponent: right, homeAway: 'Thuis' };
+  }
+  // Geen "X - A": hele summary als tegenstander (zonder eigen team ervoor te plakken)
+  return { opponent: cleanSide(summary), homeAway: 'Thuis' };
+}
+
+/* ==================================================================
+   GEDEELDE WEERGAVE: één regel in het wedstrijdverloop
+   Eigen team = links, tegenstander = rechts uitgelijnd.
+   ================================================================== */
+function eventRow(e, allowDelete, homeSide){
+  const opp = e.team === 'opp';
+  // Uitlijning volgt THUIS (links) / UIT (rechts), niet eigen/tegenstander.
+  const rightAlign = (homeSide === undefined) ? opp : !homeSide;
+  let icon='•', main='';
+  const nm = (id) => shortName(playerById(id)?.name || '?');
+  if (e.type==='goal'){
+    icon='⚽';
+    main = opp ? (e.oppName?`<b>${esc(e.oppName)}</b>`:'<b>Doelpunt</b>')
+               : `<b>${esc(nm(e.playerId))}</b>${e.assistId?` <span class="text-neutral-400">(assist ${esc(nm(e.assistId))})</span>`:''}`;
+  } else if (e.type==='card'){
+    icon = e.cardType==='Rood'?'🟥':'🟨';
+    main = opp ? `${e.oppName?`<b>${esc(e.oppName)}</b> `:''}${cardAdj(e.cardType)} kaart`
+               : `<b>${esc(nm(e.playerId))}</b> ${cardAdj(e.cardType)} kaart`;
+  } else if (e.type==='sub'){
+    icon='🔄';
+    if (opp){ main = `Wissel${e.oppName?` <span class="text-neutral-400">(${esc(e.oppName)})</span>`:''}`; }
+    else {
+      const inN = e.playerInId ? `<span class="text-green-400">▲ ${esc(nm(e.playerInId))}</span>` : '';
+      const outN = e.playerOutId ? `<span class="text-red-400">▼ ${esc(nm(e.playerOutId))}</span>` : '';
+      main = [inN, outN].filter(Boolean).join(' ') || 'Wissel';
+    }
+  }
+  const dot = e.type==='goal'?'bg-green-500':e.type==='card'?(e.cardType==='Rood'?'bg-red-600':'bg-yellow-500'):'bg-blue-500';
+  const min = `<div class="w-9 text-neutral-400 font-mono text-sm flex-none">${e.minute}'</div>`;
+  const del = allowDelete ? `<button data-act="delEvent" data-id="${e.id}" class="btn text-neutral-600 px-1 text-xs">✕</button>` : '';
+  if (rightAlign){
+    return `<div class="flex gap-2 items-start py-2 border-b border-[#222] justify-end text-right">
+      ${del}<div class="text-sm">${main} ${icon}</div><div class="tl-dot ${dot}"></div>${min}</div>`;
+  }
+  return `<div class="flex gap-2 items-start py-2 border-b border-[#222]">
+    ${min}<div class="tl-dot ${dot}"></div><div class="flex-1 text-sm">${icon} ${main}</div>${del}</div>`;
+}
+
+/* ==================================================================
+   RENDER
+   ================================================================== */
+const app = document.getElementById('app');
+const view = () => PREFS.view || 'dashboard';
+function goto(v){ PREFS.view = v; savePrefs(); render(); }
+
+function render(){
+  // Niet ingelogd (met Firebase) -> toon inlogscherm en verder niets.
+  if (FIREBASE_READY && auth && !CURRENT_USER){
+    document.getElementById('bottomnav').innerHTML = '';
+    const el = document.getElementById('topLogo'); if (el) el.innerHTML='';
+    app.innerHTML = loginView(); bindLogin(); return;
+  }
+  const t = currentTeam(), s = currentSeason();
+  renderNav();
+  renderTopLogo();
+  const v = view();
+  if (!t && v !== 'settings'){ app.innerHTML = welcomeScreen(); bind(); return; }
+  if (v === 'dashboard') app.innerHTML = dashboardView(t, s);
+  else if (v === 'players') app.innerHTML = playersView(t);
+  else if (v === 'agenda') app.innerHTML = agendaView(t, s);
+  else if (v === 'live'){
+    const lm = DATA.matches.find(x => x.id === LIVE.matchId);
+    // Viewers krijgen de read-only samenvatting/live-weergave; admins de invoer.
+    if (lm && !canEdit()) app.innerHTML = matchSummaryView(lm);
+    else app.innerHTML = liveView(t, s);
+  }
+  else if (v === 'stats') app.innerHTML = statsView(t, s);
+  else if (v === 'settings') app.innerHTML = settingsView(t, s);
+  else app.innerHTML = dashboardView(t, s);
+  bind();
+  applyRoleGate();
+  // Scherm-ticker alleen laten lopen op de live-pagina van een geopende wedstrijd.
+  if (v==='live' && LIVE.matchId){ refreshTimerDisplay(); startDisplayTick(); }
+  else { stopDisplayTick(); }
+  // Ledenlijst automatisch laden voor admin op de instellingenpagina.
+  if (v==='settings' && isAdmin() && !MEMBERS_LOADED){ MEMBERS_LOADED = true; loadMembers(); }
+}
+
+/* Verberg alle wijzig-knoppen voor viewers (read-only). */
+const WRITE_ACTS = new Set([
+  'addPlayer','addStaff','bulkAdd','editPlayer','delPlayer',
+  'addMatch','importICS','editPlayed','delMatch',
+  'goalPlus','goalMinus','timerToggle','timerPlus','timerMinus','firstHalf','secondHalf',
+  'logGoal','logCard','logSub','delEvent','lineup','finishMatch',
+  'addTeam','renameTeam','addSeason','removeLogo','importData'
+]);
+// 'startLive' bewust NIET in de lijst: viewers mogen een wedstrijd openen om de
+// live stand + timer te bekijken (read-only). De wijzig-knoppen blijven verborgen.
+function applyRoleGate(){
+  if (canEdit()) return;
+  app.querySelectorAll('[data-act]').forEach(b => { if (WRITE_ACTS.has(b.dataset.act)) b.style.display = 'none'; });
+  app.querySelectorAll('#logoInput').forEach(el => { const lab = el.closest('label'); if (lab) lab.style.display='none'; });
+}
+
+/* ---------- Inlogscherm (gebruikersnaam + teamwachtwoord) ---------- */
+const isInvite = () => /[?&]invite=true\b/.test(location.search);
+const inviteLink = () => location.origin + location.pathname + '?invite=true';
+
+function loginView(){
+  const invite = isInvite();
+  return `<div class="px-4 pt-10">
+    <div class="text-center mb-6"><div class="text-5xl mb-2">⚽</div><h1 class="text-2xl font-bold">TeamStats</h1>
+      <p class="text-neutral-400 text-sm">${invite ? 'Meld je aan bij het team' : 'Log in bij je team'}</p></div>
+    <div class="card p-5 space-y-3">
+      <div id="loginErr" class="text-red-400 text-sm" hidden></div>
+      <label class="block"><span class="text-sm text-neutral-400">${invite ? 'Kies een unieke gebruikersnaam' : 'Gebruikersnaam'}</span>
+        <input id="li_user" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" class="w-full mt-1 py-3 px-3" placeholder="bijv. jan10"></label>
+      <label class="block"><span class="text-sm text-neutral-400">Team wachtwoord</span>
+        <input id="li_pass" type="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" class="w-full mt-1 py-3 px-3" placeholder="min. 6 tekens"></label>
+      <button data-login="${invite ? 'register' : 'login'}" class="btn w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">
+        ${invite ? 'Aanmelden' : 'Inloggen'}
+      </button>
+      <p class="text-neutral-500 text-xs text-center">
+        ${invite
+          ? 'Je maakt een account met alleen een gebruikersnaam en het gedeelde teamwachtwoord. Je krijgt de rol <b>viewer</b> (alleen bekijken).'
+          : 'Nog geen account? Gebruik de <b>invite-link</b> die je van je trainer/beheerder hebt gekregen.'}
+      </p>
+    </div>
+  </div>`;
+}
+function loginErr(msg){ const e=document.getElementById('loginErr'); if(e){ e.textContent=msg; e.hidden=!msg; } }
+function bindLogin(){
+  document.querySelectorAll('[data-login]').forEach(b => b.onclick = async () => {
+    loginErr('');
+    const { clean, email } = usernameToEmail(document.getElementById('li_user').value);
+    const pass = document.getElementById('li_pass').value.trim();   // spaties eraf (mobiel/autofill)
+    if (!clean){ loginErr('Vul een geldige gebruikersnaam in (letters/cijfers).'); return; }
+    // Bij aanmelden (invite): eerst het gedeelde teamwachtwoord controleren.
+    if (b.dataset.login === 'register' && pass !== TEAM_PASSWORD){ loginErr('Onjuist team wachtwoord'); return; }
+    if ((pass||'').length < 6){ loginErr('Het teamwachtwoord is minimaal 6 tekens.'); return; }
+    PENDING_USERNAME = clean;   // onthouden voor het users-document
+    try {
+      if (b.dataset.login === 'register'){
+        await auth.createUserWithEmailAndPassword(email, pass);   // nieuw account (wachtwoord = teamwachtwoord)
+      } else {
+        await auth.signInWithEmailAndPassword(email, pass);       // bestaand account
+      }
+    } catch (e) {
+      PENDING_USERNAME = null;
+      loginErr(vertaalAuthError(e, b.dataset.login));
+    }
+  });
+}
+let PENDING_USERNAME = null;   // gekozen gebruikersnaam tijdens aanmelden
+function vertaalAuthError(e, mode){
+  const c = (e && e.code) || '';
+  if (c.includes('weak-password')) return 'Het teamwachtwoord is te kort (min. 6 tekens).';
+  if (c.includes('email-already-in-use')) return 'Die gebruikersnaam bestaat al. Kies een andere.';
+  if (c.includes('invalid-credential')||c.includes('wrong-password')) return 'Verkeerd teamwachtwoord.';
+  if (c.includes('user-not-found')) return mode==='login' ? 'Onbekende gebruikersnaam. Gebruik je invite-link om je aan te melden.' : 'Aanmelden mislukt.';
+  if (c.includes('unauthorized-domain')) return 'Dit domein is nog niet toegestaan in Firebase (Authentication → Settings → Authorized domains).';
+  if (c.includes('operation-not-allowed')) return 'E-mail/wachtwoord-login staat nog uit in Firebase (Authentication → Sign-in method).';
+  return (e && e.message) || 'Inloggen mislukt.';
+}
+
+/* ---------- Ledenlijst (admin) ---------- */
+async function loadMembers(){
+  if (!db || !isAdmin()) return;
+  try {
+    const snap = await db.collection('users').get();
+    MEMBERS = snap.docs.map(d => ({ uid:d.id, ...d.data() }));
+    render();
+  } catch (e) { console.error('Leden laden mislukt:', e); }
+}
+function header(title, sub){
+  return `<div class="px-4 pt-6 pb-2">
+    <h1 class="text-2xl font-bold">${esc(title)}</h1>
+    ${sub ? `<p class="text-neutral-400 text-sm mt-1">${esc(sub)}</p>` : ''}</div>`;
+}
+// Klein logo rechtsboven (niet op Overzicht — daar staat het naast de naam)
+function renderTopLogo(){
+  const el = document.getElementById('topLogo'); if (!el) return;
+  const t = currentTeam();
+  el.innerHTML = (t && t.logo && view()!=='dashboard')
+    ? `<img src="${t.logo}" alt="logo" class="w-9 h-9 rounded-lg object-cover border border-[#333] bg-[#171717]">` : '';
+  updateFavicon();
+}
+const DEFAULT_FAVICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⚽%3C/text%3E%3C/svg%3E";
+function updateFavicon(){
+  const link = document.getElementById('appFavicon') || (() => {
+    const l = document.createElement('link'); l.id = 'appFavicon'; l.rel = 'icon'; document.head.appendChild(l); return l;
+  })();
+  const t = currentTeam();
+  link.href = (t && t.logo) ? t.logo : DEFAULT_FAVICON;
+}
+// Verklein een geüploade afbeelding naar max 256px en geef een data-URL terug.
+function resizeImage(file, max, cb){
+  const r = new FileReader();
+  r.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (w >= h && w > max){ h = Math.round(h*max/w); w = max; }
+      else if (h > w && h > max){ w = Math.round(w*max/h); h = max; }
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      cb(c.toDataURL('image/png'));
+    };
+    img.onerror = () => cb(null);
+    img.src = r.result;
+  };
+  r.readAsDataURL(file);
+}
+function handleLogoFile(e){
+  const f = e.target.files[0]; if (!f) return;
+  const t = currentTeam(); if (!t) return;
+  resizeImage(f, 256, (dataUrl) => { if (!dataUrl){ alert('Kon deze afbeelding niet laden.'); return; } t.logo = dataUrl; commit(); });
+}
+
+/* ---------- Welkomstscherm ---------- */
+function welcomeScreen(){
+  return header('TeamStats', 'Voetbalstatistieken voor je team') + `
+  <div class="px-4"><div class="card p-6 text-center">
+      <div class="text-5xl mb-3">⚽</div>
+      <h2 class="text-lg font-bold mb-1">Welkom!</h2>
+      <p class="text-neutral-400 text-sm mb-5">Maak eerst een team en een seizoen aan bij <b>Instellingen</b> om te beginnen.</p>
+      <button data-act="gotoSettings" class="btn w-full bg-green-600 hover:bg-green-500 py-4 rounded-xl font-bold text-lg">⚙ Naar Instellingen</button>
+  </div></div>`;
+}
+
+/* ---------- 1. DASHBOARD (Overzicht) – seizoenstotalen ---------- */
+function dashboardView(t, s){
+  const stats = s ? computeStats(t.id, s.id) : [];
+  const topscorer = [...stats].sort((a,b)=>b.goals-a.goals)[0];
+  const topassist = [...stats].sort((a,b)=>b.assists-a.assists)[0];
+  const nm = s ? nextMatch(t.id, s.id) : null;
+  const gespeeld = s ? seasonMatches(t.id,s.id).filter(m=>m.status==='Gespeeld').length : 0;
+  const totGoals = stats.reduce((a,b)=>a+b.goals,0);
+
+  return `<div class="px-4 pt-6 pb-2 flex items-center gap-3">
+    ${t.logo ? `<img src="${t.logo}" alt="logo" class="w-8 h-8 rounded-lg object-cover border border-[#333] flex-none">` : ''}
+    <div class="min-w-0">
+      <h1 class="text-2xl font-bold truncate">${esc(t.name)}</h1>
+      <p class="text-neutral-400 text-sm">${s ? 'Seizoen '+esc(s.name) : 'Nog geen seizoen'}</p>
+    </div>
+  </div>` + `
+  <div class="px-4 space-y-4">
+    <div>
+      <h3 class="text-lg font-bold mb-2">Eerstvolgende wedstrijd</h3>
+      ${nm ? `
+      <div class="card p-4">
+        <div class="text-lg font-bold">${esc(matchTitle(nm))}</div>
+        <div class="text-neutral-400 text-sm mt-1">${esc(nm.date)} · ${esc(nm.time)} · ${esc(nm.homeAway)} · ${esc(nm.type||'Competitie')}</div>
+        <button data-act="startLive" data-id="${nm.id}" class="btn mt-3 text-green-400 font-semibold">Score en acties bijwerken →</button>
+      </div>` : `<div class="card p-4 text-neutral-400 text-sm">Nog geen geplande wedstrijd. Voeg er een toe bij Wedstrijden.</div>`}
+    </div>
+
+    <h3 class="text-lg font-bold">Seizoenstotalen</h3>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Topscorer</div>
+        <div class="text-lg font-bold mt-1 truncate">${topscorer && topscorer.goals>0 ? esc(topscorer.name) : 'Nog niet bekend'}</div>
+        <div class="text-neutral-500 text-xs">${topscorer ? topscorer.goals : 0} goals</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Meeste assists</div>
+        <div class="text-lg font-bold mt-1 truncate">${topassist && topassist.assists>0 ? esc(topassist.name) : 'Nog niet bekend'}</div>
+        <div class="text-neutral-500 text-xs">${topassist ? topassist.assists : 0} assists</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Gespeelde wedstrijden</div>
+        <div class="text-3xl font-bold mt-1">${gespeeld}</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-neutral-400 text-sm">Doelpunten voor</div>
+        <div class="text-3xl font-bold mt-1">${totGoals}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------- 2. SPELERS / STAF ---------- */
+function playersView(t){
+  const byName = (a,b) => (a.name||'').localeCompare(b.name||'','nl',{sensitivity:'base'});
+  const players = teamPlayers(t.id).sort(byName);
+  const staff = teamStaff(t.id).sort(byName);
+  const row = p => `<div class="card p-3 flex items-center gap-3">
+      <div class="w-9 h-9 rounded-full bg-green-600/20 text-green-400 font-bold flex items-center justify-center flex-none">${p.number ?? '–'}</div>
+      <div class="flex-1 min-w-0"><div class="font-semibold truncate">${esc(p.name)}</div><div class="text-neutral-400 text-xs">${esc(p.position||'—')}</div></div>
+      <button data-act="editPlayer" data-id="${p.id}" class="btn text-neutral-400 px-2">✎</button>
+      <button data-act="delPlayer" data-id="${p.id}" class="btn text-red-400 px-2">🗑</button></div>`;
+  const staffRow = p => `<div class="card p-3 flex items-center gap-3">
+      <div class="w-9 h-9 rounded-full bg-blue-600/20 text-blue-300 font-bold flex items-center justify-center flex-none">S</div>
+      <div class="flex-1 min-w-0"><div class="font-semibold truncate">${esc(p.name)}</div><div class="text-neutral-400 text-xs">${esc(p.position||'Staf')}</div></div>
+      <button data-act="editPlayer" data-id="${p.id}" class="btn text-neutral-400 px-2">✎</button>
+      <button data-act="delPlayer" data-id="${p.id}" class="btn text-red-400 px-2">🗑</button></div>`;
+
+  return header('Spelers / Staf', t.name) + `
+  <div class="px-4 space-y-3">
+    <div class="grid grid-cols-2 gap-2">
+      <button data-act="addPlayer" class="btn bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Speler</button>
+      <button data-act="addStaff" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">+ Staflid</button>
+    </div>
+    <button data-act="bulkAdd" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">📋 Meerdere in één keer plakken</button>
+    <div class="grid grid-cols-3 gap-2 text-center">
+      <div class="card p-3"><div class="text-2xl font-bold">${players.length}</div><div class="text-xs text-neutral-400">Spelers</div></div>
+      <div class="card p-3"><div class="text-2xl font-bold">${staff.length}</div><div class="text-xs text-neutral-400">Staf</div></div>
+      <div class="card p-3"><div class="text-2xl font-bold">${DATA.matches.filter(m=>m.teamId===t.id).length}</div><div class="text-xs text-neutral-400">Wedstrijden</div></div>
+    </div>
+    <h3 class="font-bold mt-2">Selectie</h3>
+    ${players.length ? players.map(row).join('') : '<div class="text-neutral-500 text-sm">Nog geen spelers.</div>'}
+    <h3 class="font-bold mt-4">Staf</h3>
+    ${staff.length ? staff.map(staffRow).join('') : '<div class="text-neutral-500 text-sm">Nog geen staf.</div>'}
+  </div>`;
+}
+
+/* ---------- 3. WEDSTRIJDEN ---------- */
+function agendaView(t, s){
+  if (!s) return header('Wedstrijden') + '<div class="px-4 text-neutral-400">Maak eerst een seizoen aan bij Instellingen.</div>';
+  const matches = seasonMatches(t.id, s.id);
+  const planned = matches.filter(m => m.status !== 'Gespeeld');
+  const played  = matches.filter(m => m.status === 'Gespeeld');
+  const row = m => {
+    const gespeeld = m.status==='Gespeeld';
+    let actBtn;
+    if (!canEdit()){
+      actBtn = `<button data-act="startLive" data-id="${m.id}" class="btn bg-green-600/20 text-green-400 text-xs font-bold px-3 py-2 rounded-lg">Bekijken</button>`;
+    } else if (gespeeld){
+      actBtn = `<button data-act="editPlayed" data-id="${m.id}" class="btn bg-[#262626] hover:bg-[#333] text-neutral-200 text-xs font-bold px-3 py-2 rounded-lg">Bewerken</button>`;
+    } else {
+      actBtn = `<button data-act="startLive" data-id="${m.id}" class="btn bg-green-600/20 text-green-400 text-xs font-bold px-3 py-2 rounded-lg">Invoer</button>`;
+    }
+    const delBtn = canEdit() ? `<button data-act="delMatch" data-id="${m.id}" class="btn text-red-400 px-1">🗑</button>` : '';
+    return `<div class="card p-3 flex items-center gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold truncate">${esc(matchTitle(m))}</div>
+        <div class="text-neutral-400 text-xs">${esc(m.date)} · ${esc(m.time)} · ${esc(m.homeAway)}${gespeeld?` · <span class="text-white font-semibold">${m.homeScore}–${m.awayScore}</span>`:''}</div>
+      </div>${actBtn}${delBtn}</div>`;
+  };
+  return header('Wedstrijden', `${t.name} · ${s.name}`) + `
+  <div class="px-4 space-y-3">
+    <div class="grid grid-cols-2 gap-2">
+      <button data-act="addMatch" class="btn bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Wedstrijd</button>
+      <button data-act="importICS" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">⬆ ICS importeren</button>
+    </div>
+    <h3 class="font-bold mt-2">Gepland (${planned.length})</h3>
+    ${planned.length ? planned.map(row).join('') : '<div class="text-neutral-500 text-sm">Geen geplande wedstrijden.</div>'}
+    ${played.length ? `<h3 class="font-bold mt-4">Gespeeld (${played.length})</h3>${played.map(row).join('')}` : ''}
+  </div>`;
+}
+
+/* ---------- 4. LIVE MATCH TRACKER ---------- */
+function liveView(t, s){
+  const m = DATA.matches.find(x => x.id === LIVE.matchId);
+  if (!m){
+    const today = new Date().toISOString().slice(0,10);
+    const matches = s ? seasonMatches(t.id, s.id).filter(x => x.date === today) : [];
+    return header('Live invoer', 'Wedstrijden van vandaag') + `
+    <div class="px-4 space-y-2">
+      ${matches.length ? matches.map(x => `<button data-act="startLive" data-id="${x.id}" class="btn card p-4 w-full text-left flex items-center justify-between">
+        <div><div class="font-semibold">${esc(matchTitle(x))}</div><div class="text-neutral-400 text-xs">${esc(x.time)} · ${esc(x.homeAway)} · ${esc(x.status||'Gepland')}</div></div>
+        <span class="text-green-400">→</span></button>`).join('')
+        : `<div class="card p-4 text-neutral-400 text-sm">Geen wedstrijden vandaag (${esc(today)}). Een wedstrijd op een andere dag open je via <b>Wedstrijden</b> met de knop Invoer/Bewerken.</div>`}
+    </div>`;
+  }
+  const events = (m.events||[]).slice().sort((a,b)=>a.minute-b.minute);
+  const leftName = m.homeAway==='Uit'?m.opponent:t.name;
+  const rightName = m.homeAway==='Uit'?t.name:m.opponent;
+  const statusLabel = m.status==='Gespeeld' ? 'Eindstand' : 'Tussenstand';
+
+  return `<div class="px-4 pt-6 pb-2">
+    <button data-act="closeLive" class="text-neutral-400 text-sm mb-2">← Terug</button>
+    <h1 class="text-xl font-bold">${esc(matchTitle(m))}</h1>
+    <p class="text-neutral-400 text-sm">${esc(m.date)} · ${esc(m.homeAway)}</p>
+  </div>
+  <div class="px-4 space-y-4">
+
+    <!-- Score -->
+    <div class="card p-4">
+      <div class="grid grid-cols-3 items-center text-center">
+        <div>
+          <div class="text-xs text-neutral-400 truncate">${esc(leftName)}</div>
+          <div class="text-4xl font-bold my-1">${m.homeScore||0}</div>
+          <div class="flex gap-1 justify-center">
+            <button data-act="goalMinus" data-side="home" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">−</button>
+            <button data-act="goalPlus" data-side="home" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">+</button>
+          </div>
+        </div>
+        <div class="text-neutral-500 text-2xl">–</div>
+        <div>
+          <div class="text-xs text-neutral-400 truncate">${esc(rightName)}</div>
+          <div class="text-4xl font-bold my-1">${m.awayScore||0}</div>
+          <div class="flex gap-1 justify-center">
+            <button data-act="goalMinus" data-side="away" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">−</button>
+            <button data-act="goalPlus" data-side="away" class="btn bg-[#262626] w-9 h-9 rounded-lg text-lg">+</button>
+          </div>
+        </div>
+      </div>
+      <p class="text-neutral-500 text-[11px] text-center mt-2">+ opent het goal-venster · − verwijdert het laatste doelpunt van dat team</p>
+    </div>
+
+    <!-- Timer (tweefasen) -->
+    <div class="card p-4 text-center">
+      <div id="timerDisplay" class="text-5xl font-bold font-mono">${timerHTML()}</div>
+      <div class="text-neutral-500 text-xs mt-1">${LIVE.half===1?'1e helft':'2e helft'} · minuut ${liveMin()}</div>
+      <div class="flex gap-2 mt-3 justify-center">
+        <button data-act="timerMinus" class="btn bg-[#262626] w-12 h-11 rounded-lg text-sm font-bold">−1'</button>
+        <button data-act="timerToggle" class="btn ${LIVE.running?'bg-yellow-600 hover:bg-yellow-500':'bg-green-600 hover:bg-green-500'} flex-1 h-11 rounded-lg font-bold">${LIVE.running?'⏸ Pauze':'▶ Start'}</button>
+        <button data-act="timerPlus" class="btn bg-[#262626] w-12 h-11 rounded-lg text-sm font-bold">+1'</button>
+      </div>
+      <div class="grid grid-cols-2 gap-2 mt-2">
+        <button data-act="firstHalf" class="btn bg-[#262626] hover:bg-[#333] py-2.5 rounded-lg text-sm font-semibold ${LIVE.half===1?'text-green-400':''}">1e helft</button>
+        <button data-act="secondHalf" class="btn bg-[#262626] hover:bg-[#333] py-2.5 rounded-lg text-sm font-semibold ${LIVE.half===2?'text-green-400':''}">2e helft (→ 45:00)</button>
+      </div>
+    </div>
+
+    <!-- Opstelling (visueel veld + bank, drag & drop) -->
+    <button data-act="lineup" class="btn card p-4 w-full text-left flex items-center justify-between">
+      <div><div class="font-semibold">⚽ Opstelling — veld &amp; bank</div><div class="text-neutral-400 text-xs">${((m.onField&&m.onField.length)||(m.lineup||[]).length)} op het veld · sleep om te wisselen</div></div>
+      <span class="text-green-400">openen →</span>
+    </button>
+
+    <!-- Actieknoppen -->
+    <div class="grid grid-cols-3 gap-2">
+      <button data-act="logGoal" class="btn bg-green-600 hover:bg-green-500 py-5 rounded-xl font-bold text-lg">⚽<br><span class="text-sm">Goal</span></button>
+      <button data-act="logCard" class="btn bg-yellow-600 hover:bg-yellow-500 py-5 rounded-xl font-bold text-lg">🟨<br><span class="text-sm">Kaart</span></button>
+      <button data-act="logSub" class="btn bg-blue-600 hover:bg-blue-500 py-5 rounded-xl font-bold text-lg">🔄<br><span class="text-sm">Wissel</span></button>
+    </div>
+    <p class="text-neutral-500 text-xs text-center">In elk venster kies je <b>Eigen team</b> of <b>Tegenstander</b>.</p>
+
+    <button data-act="finishMatch" class="btn w-full ${m.status==='Gespeeld'?'bg-[#262626]':'bg-[#1f3d2b] hover:bg-[#264a34] text-green-300'} py-3 rounded-xl font-semibold">
+      ${m.status==='Gespeeld'?'✓ Afgerond — heropenen':'Wedstrijd afronden (gespeelde tijd = huidige timer)'}
+    </button>
+
+    <!-- Wedstrijdverloop (met score voor de screenshot) -->
+    <div>
+      <h3 class="font-bold mb-1">Wedstrijdverloop</h3>
+      <div id="timelineArea" class="card p-3">
+        <div class="text-center pb-2 mb-2 border-b border-[#222]">
+          <div class="text-sm font-semibold">${esc(leftName)} <span class="text-green-400">${m.homeScore||0} – ${m.awayScore||0}</span> ${esc(rightName)}</div>
+          <div class="text-[11px] text-neutral-400">${esc(m.date)} · ${statusLabel}</div>
+        </div>
+        <div class="flex justify-between text-[11px] text-neutral-500 pb-1 mb-1">
+          <span>◀ ${esc(leftName)}</span><span>${esc(rightName)} ▶</span>
+        </div>
+        ${events.length ? events.map(e => eventRow(e, true, (e.team==='opp')? (m.homeAway==='Uit') : (m.homeAway!=='Uit'))).join('') : '<div class="text-neutral-500 text-sm text-center py-4">Nog geen acties. Log een goal, kaart of wissel.</div>'}
+      </div>
+      <button data-act="shotTimeline" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold mt-2">🖼 Screenshot van het verloop</button>
+    </div>
+  </div>`;
+}
+
+/* ---------- Read-only SAMENVATTING / LIVE (voor viewers) ---------- */
+function matchSummaryView(m){
+  const t = currentTeam();
+  const ourHome = m.homeAway !== 'Uit';
+  const leftName = ourHome ? t.name : m.opponent;
+  const rightName = ourHome ? m.opponent : t.name;
+  const leftLogo = ourHome ? (t.logo||'') : '';
+  const rightLogo = ourHome ? '' : (t.logo||'');
+
+  // Events chronologisch + doorlopende stand voor de score-badges.
+  const evs = (m.events||[]).slice().sort((a,b)=> (a.minute-b.minute));
+  let hs=0, as=0;
+  const rowsData = evs.map(e=>{
+    let badge=null;
+    if (e.type==='goal'){
+      const homeGoal = (e.team==='opp') ? !ourHome : ourHome;
+      if (homeGoal) hs++; else as++;
+      badge = `${hs}–${as}`;
+    }
+    const homeSide = (e.team==='opp') ? !ourHome : ourHome;
+    return { e, badge, homeSide };
+  });
+  const half = (mn)=> mn<=45 ? 1 : 2;
+  const h1 = rowsData.filter(x=>half(x.e.minute)===1);
+  const h2 = rowsData.filter(x=>half(x.e.minute)===2);
+  const halfScore = (arr)=>{ let h=0,a=0; arr.forEach(x=>{ if(x.e.type==='goal'){ const hg=(x.e.team==='opp')?!ourHome:ourHome; if(hg)h++; else a++; } }); return `${h} - ${a}`; };
+
+  const nm = (id)=> shortName(playerById(id)?.name || '?');
+  const sumRow = (x)=>{
+    const {e, badge, homeSide} = x;
+    const min = `${e.minute}'`;
+    let icon='', content='';
+    if (e.type==='goal'){
+      icon='⚽';
+      const who = (e.team==='opp') ? (e.oppName?esc(e.oppName):'') : `<b>${esc(nm(e.playerId))}</b>`;
+      const assist = (e.team!=='opp' && e.assistId) ? ` <span class="text-neutral-400">(${esc(nm(e.assistId))})</span>` : '';
+      const scoreBadge = `<span class="inline-block border border-[#3a3a3a] rounded px-1.5 py-0.5 text-xs font-bold mx-1">${badge} ⚽</span>`;
+      content = homeSide ? `${who}${assist} ${scoreBadge}` : `${scoreBadge} ${who}${assist}`;
+    } else if (e.type==='card'){
+      icon = e.cardType==='Rood'?'🟥':'🟨';
+      const who = (e.team==='opp') ? (e.oppName?esc(e.oppName):'') : `<b>${esc(nm(e.playerId))}</b>`;
+      content = homeSide ? `${who} <span class="ml-1">${icon}</span>` : `<span class="mr-1">${icon}</span> ${who}`;
+    } else if (e.type==='sub'){
+      const swap = `<span class="text-green-400">🔁</span>`;
+      let txt;
+      if (e.team==='opp'){ txt = e.oppName?esc(e.oppName):'Wissel'; }
+      else {
+        const inN = e.playerInId?`<span class="text-green-400">${esc(nm(e.playerInId))}</span>`:'';
+        const outN = e.playerOutId?` <span class="text-neutral-400">(${esc(nm(e.playerOutId))})</span>`:'';
+        txt = (inN+outN) || 'Wissel';
+      }
+      content = homeSide ? `${txt} ${swap}` : `${swap} ${txt}`;
+    }
+    return `<div class="flex items-center gap-2 py-2 border-b border-[#222] ${homeSide?'':'flex-row-reverse text-right'}">
+      <div class="w-10 text-neutral-400 font-mono text-xs flex-none">${min}</div>
+      <div class="flex-1 text-sm">${content}</div>
+    </div>`;
+  };
+  const section = (label, arr)=> `
+    <div class="flex items-center justify-between bg-[#1b2330] px-3 py-2 mt-3 rounded-t-lg">
+      <span class="font-bold text-sm">${label}</span><span class="text-neutral-300 text-sm font-semibold">${halfScore(arr)}</span>
+    </div>
+    <div class="card rounded-t-none px-3 py-1">${arr.length?arr.map(sumRow).join(''):'<div class="text-neutral-600 text-sm text-center py-3">Geen gebeurtenissen</div>'}</div>`;
+
+  const finished = m.status==='Gespeeld';
+  const started = timerStartedNow();
+  const statusLine = finished
+    ? '<span class="text-neutral-300 font-semibold">Beëindigd</span>'
+    : (started
+        ? `<span class="text-red-500 font-semibold">${LIVE.half===1?'1e':'2e'} helft · <span id="timerDisplay">${timerHTML()}</span></span>`
+        : '<span class="text-neutral-400">Gepland</span>');
+
+  const logoBox = (logo)=> logo
+    ? `<img src="${logo}" class="w-14 h-14 rounded-2xl object-cover mx-auto">`
+    : `<div class="w-14 h-14 rounded-2xl bg-[#262626] mx-auto flex items-center justify-center text-2xl">⚽</div>`;
+
+  return `<div class="px-4 pt-6 pb-2">
+      <button data-act="closeLive" class="text-neutral-400 text-sm mb-3">← Terug</button>
+    </div>
+    <div class="px-4">
+      <div class="grid grid-cols-3 items-center text-center gap-2">
+        <div>${logoBox(leftLogo)}<div class="mt-2 font-semibold text-sm leading-tight">${esc(leftName)}</div></div>
+        <div>
+          <div class="text-neutral-400 text-xs">${esc(m.date)}${m.time?' '+esc(m.time):''}</div>
+          <div class="text-4xl font-extrabold my-1">${m.homeScore||0}-${m.awayScore||0}</div>
+          <div class="text-xs">${statusLine}</div>
+        </div>
+        <div>${logoBox(rightLogo)}<div class="mt-2 font-semibold text-sm leading-tight">${esc(rightName)}</div></div>
+      </div>
+      <h3 class="text-lg font-bold mt-5 mb-1">Samenvatting</h3>
+      ${(h1.length||h2.length) ? section('1E HELFT', h1) + section('2E HELFT', h2)
+         : '<div class="card p-4 text-neutral-400 text-sm">Nog geen gebeurtenissen geregistreerd.</div>'}
+    </div>`;
+}
+
+/* ---------- 5. STATISTIEKEN ---------- */
+function statsView(t, s){
+  if (!s) return header('Statistieken') + '<div class="px-4 text-neutral-400">Maak eerst een seizoen aan bij Instellingen.</div>';
+  const sortKey = PREFS.sortKey || 'goals';
+  const rows = computeStats(t.id, s.id).sort((a,b)=>{
+    if (sortKey==='name') return a.name.localeCompare(b.name);
+    return (b[sortKey]||0) - (a[sortKey]||0);
+  });
+  const cols = [['name','Speler'],['gp','GW'],['starts','Bas'],['subIn','Wis'],['goals','G'],['assists','A'],['yellow','🟨'],['red','🟥'],['minutes','Min']];
+  const th = cols.map(([k,l]) => `<th data-sort="${k}" class="px-2 py-2 text-left cursor-pointer whitespace-nowrap ${sortKey===k?'text-green-400':'text-neutral-400'}">${l}${sortKey===k?' ▾':''}</th>`).join('');
+  const body = rows.map(r => `<tr class="border-t border-[#222]">
+      <td class="px-2 py-2 font-medium whitespace-nowrap">${esc(r.name)}${r.number!=null?` <span class="text-neutral-500 text-xs">#${r.number}</span>`:''}</td>
+      <td class="px-2 py-2 text-center">${r.gp}</td>
+      <td class="px-2 py-2 text-center">${r.starts||''}</td>
+      <td class="px-2 py-2 text-center">${r.subIn||''}</td>
+      <td class="px-2 py-2 text-center font-bold ${r.goals?'text-green-400':''}">${r.goals}</td>
+      <td class="px-2 py-2 text-center ${r.assists?'text-blue-300':''}">${r.assists}</td>
+      <td class="px-2 py-2 text-center">${r.yellow||''}</td>
+      <td class="px-2 py-2 text-center">${r.red||''}</td>
+      <td class="px-2 py-2 text-center text-neutral-300">${r.minutes}</td></tr>`).join('');
+  return header('Statistieken', `${t.name} · ${s.name}`) + `
+  <div class="px-4 space-y-3">
+    <div class="grid grid-cols-2 gap-2">
+      <button data-act="exportCSV" class="btn bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">⬇ Export CSV</button>
+      <button data-act="printTable" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">🖼 Screenshot / print</button>
+    </div>
+    <div id="printArea" class="card p-2 overflow-x-auto">
+      <div class="px-2 py-2 font-bold hidden print:block">${esc(t.name)} — Statistieken ${esc(s.name)}</div>
+      <table class="w-full text-sm">
+        <thead><tr>${th}</tr></thead>
+        <tbody>${rows.length?body:'<tr><td colspan="9" class="text-center text-neutral-500 py-6">Nog geen data. Speel en registreer wedstrijden.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <p class="text-neutral-500 text-xs">GW = gespeelde wedstrijden · Bas = basisplaatsen · Wis = wisselbeurten (ingevallen) · G = goals · A = assists · Min = speelminuten. Tik een kolomkop om te sorteren.</p>
+  </div>`;
+}
+
+/* ---------- 6. INSTELLINGEN ---------- */
+function settingsView(t, s){
+  const teamOpts = DATA.teams.map(x => `<option value="${x.id}" ${x.id===t?.id?'selected':''}>${esc(x.name)}</option>`).join('');
+  const seasonOpts = DATA.seasons.map(x => `<option value="${x.id}" ${x.id===s?.id?'selected':''}>${esc(x.name)}</option>`).join('');
+  return header('Instellingen', 'Kies en beheer je team en seizoen') + `
+  <div class="px-4 space-y-4">
+    ${accountCard()}
+    ${membersCard()}
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Actief team</h3>
+      ${DATA.teams.length ? `<select id="teamSel" class="w-full py-3 px-3 font-semibold">${teamOpts}</select>` : '<p class="text-neutral-400 text-sm">Nog geen team.</p>'}
+      <button data-act="addTeam" class="btn w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Nieuw team</button>
+      ${t ? `<button data-act="renameTeam" class="btn w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl text-sm font-semibold">Team hernoemen</button>` : ''}
+      ${t ? `
+      <div class="border-t border-[#262626] pt-3">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 rounded-lg bg-[#262626] border border-[#333] flex items-center justify-center overflow-hidden flex-none">
+            ${t.logo ? `<img src="${t.logo}" alt="logo" class="w-full h-full object-cover">` : '<span class="text-neutral-500 text-xs">geen</span>'}
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-semibold">Teamlogo</div>
+            <div class="text-neutral-500 text-xs">JPG, JPEG of PNG · klein weergegeven rechtsboven</div>
+          </div>
+        </div>
+        <label class="btn block w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl text-sm font-semibold text-center cursor-pointer mt-2">
+          ${t.logo ? 'Logo vervangen' : 'Logo uploaden'}
+          <input id="logoInput" type="file" accept="image/png,image/jpeg,image/jpg" class="hidden">
+        </label>
+        ${t.logo ? `<button data-act="removeLogo" class="btn w-full text-red-400 py-2 rounded-xl text-sm font-semibold mt-1">Logo verwijderen</button>` : ''}
+      </div>` : ''}
+    </div>
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Actief seizoen</h3>
+      ${DATA.seasons.length ? `<select id="seasonSel" class="w-full py-3 px-3 font-semibold">${seasonOpts}</select>` : '<p class="text-neutral-400 text-sm">Nog geen seizoen.</p>'}
+      <button data-act="addSeason" class="btn w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">+ Nieuw seizoen</button>
+    </div>
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Weergave</h3>
+      <div class="flex items-center justify-between">
+        <div class="text-sm text-neutral-400">Thema: <b>${PREFS.theme==='light'?'Licht':'Donker'}</b></div>
+        <button data-act="toggleTheme" class="btn bg-[#262626] hover:bg-[#333] px-4 py-2.5 rounded-xl text-sm font-semibold">${PREFS.theme==='light'?'🌙 Donker':'☀️ Licht'}</button>
+      </div>
+    </div>
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Back-up &amp; herstel</h3>
+      <p class="text-neutral-400 text-sm">Bewaar al je data (teams, spelers, wedstrijden) als bestand, of zet een eerdere back-up terug. Handig bij updates van de app.</p>
+      <button data-act="exportData" class="btn w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">⬇ Exporteer data (JSON)</button>
+      <button data-act="importData" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">⬆ Importeer data (JSON)</button>
+      <p class="text-neutral-500 text-xs">Je data staat nu lokaal in deze browser. Zie het document in je project voor de stappen naar live delen met Firebase.</p>
+    </div>
+  </div>`;
+}
+
+/* ---------- Account-kaart (ingelogd) ---------- */
+function accountCard(){
+  if (!FIREBASE_READY || !CURRENT_USER) return '';
+  const roleBadge = isAdmin()
+    ? '<span class="text-green-400 font-semibold">admin</span>'
+    : '<span class="text-neutral-300">viewer</span>';
+  return `<div class="card p-4 space-y-3">
+    <h3 class="font-bold">Account</h3>
+    <div class="text-sm">Gebruikersnaam: <b>${esc(USER_NAME||emailToUsername(CURRENT_USER.email))}</b></div>
+    <div class="text-sm text-neutral-400">Rol: ${roleBadge}</div>
+    <button data-act="logout" class="btn w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl text-sm font-semibold">Uitloggen</button>
+  </div>`;
+}
+
+/* ---------- Ledenbeheer (alleen admin) ---------- */
+function membersCard(){
+  if (!isAdmin()) return '';
+  const rows = MEMBERS.map(u => {
+    const me = CURRENT_USER && u.uid===CURRENT_USER.uid;
+    const admin = u.role==='admin';
+    return `<div class="card p-3 flex items-center gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold truncate">${esc(u.username||emailToUsername(u.email)||u.uid)}${me?' <span class="text-neutral-500 text-xs">(jij)</span>':''}</div>
+        <div class="text-xs ${admin?'text-green-400':'text-neutral-400'}">${admin?'admin':'viewer'}</div>
+      </div>
+      <button data-act="toggleRole" data-uid="${u.uid}" data-role="${admin?'viewer':'admin'}" class="btn ${admin?'bg-[#262626] text-neutral-200':'bg-green-600'} text-xs font-bold px-3 py-2 rounded-lg">
+        ${admin?'Maak viewer':'Maak admin'}
+      </button>
+    </div>`;
+  }).join('');
+  return `<div class="card p-4 space-y-3">
+    <div class="flex items-center justify-between">
+      <h3 class="font-bold">Leden ${MEMBERS.length?`(${MEMBERS.length})`:''}</h3>
+      <button data-act="loadMembers" class="btn text-green-400 text-sm font-semibold">Vernieuwen</button>
+    </div>
+    <p class="text-neutral-500 text-xs">Alleen zichtbaar voor admins. Wijzig hier de rol van geregistreerde gebruikers.</p>
+    ${MEMBERS.length ? rows : '<div class="text-neutral-500 text-sm">Nog geen leden geladen of gevonden.</div>'}
+    <div class="border-t border-[#262626] pt-3">
+      <div class="text-sm font-semibold mb-1">Invite-link voor teamgenoten</div>
+      <p class="text-neutral-500 text-xs mb-2">Deel deze link + het teamwachtwoord. Nieuwe mensen kiezen een gebruikersnaam en worden <b>viewer</b>.</p>
+      <div class="flex gap-2">
+        <input id="inviteLinkBox" readonly value="${esc(inviteLink())}" class="flex-1 py-2 px-3 text-xs">
+        <button data-act="copyInvite" class="btn bg-green-600 hover:bg-green-500 px-3 rounded-lg text-sm font-semibold">Kopieer</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------- Bottom nav ---------- */
+function renderNav(){
+  const items = [
+    ['dashboard','Overzicht','▦'],
+    ['agenda','Wedstrijden','📅'],
+    ['players','Spelers','👥'],
+    ['live','Live','✎'],
+    ['stats','Stats','📊'],
+    ['settings','Instel.','⚙'],
+  ];   // Live-tab voor iedereen: viewers kijken read-only mee (incl. live timer)
+  document.getElementById('bottomnav').style.gridTemplateColumns = `repeat(${items.length},minmax(0,1fr))`;
+  document.getElementById('bottomnav').innerHTML = items.map(([v,l,ic]) =>
+    `<button data-nav="${v}" class="btn py-2.5 flex flex-col items-center gap-0.5 ${view()===v?'text-green-400':'text-neutral-500'}">
+       <span class="text-lg leading-none">${ic}</span><span class="text-[10px]">${l}</span></button>`).join('');
+}
+
+/* ==================================================================
+   MODALS
+   ================================================================== */
+const modalRoot = document.getElementById('modalRoot');
+function closeModal(){ modalRoot.innerHTML=''; }
+function openModal(title, inner, footer){
+  modalRoot.innerHTML = `<div class="fixed inset-0 bg-black/70 z-50 flex items-end sm:items-center justify-center" data-modalbg>
+    <div class="bg-[#171717] w-full max-w-lg rounded-t-2xl sm:rounded-2xl border border-[#333] max-h-[90vh] overflow-y-auto"><div class="p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold">${esc(title)}</h2>
+        <button data-act="closeModal" class="btn text-neutral-400 text-2xl leading-none">×</button>
+      </div>${inner}${footer||''}
+    </div></div></div>`;
+  modalRoot.querySelector('[data-modalbg]').addEventListener('click', e => { if (e.target.dataset.modalbg!==undefined) closeModal(); });
+  bindModal();
+}
+const field = (label, html) => `<label class="block mb-3"><span class="text-sm text-neutral-400">${label}</span>${html}</label>`;
+const inp = (id, ph='', type='text', val='') => `<input id="${id}" type="${type}" value="${esc(val)}" placeholder="${esc(ph)}" class="w-full mt-1 py-3 px-3">`;
+
+function sideToggle(active){
+  active = active || 'own';
+  const cls = (side) => active===side ? 'bg-green-600' : 'bg-[#262626]';
+  return `<input type="hidden" id="f_sideVal" value="${active}">
+  <div class="grid grid-cols-2 gap-2 mb-3">
+    <button type="button" data-side="own" class="btn sideBtn ${cls('own')} py-2.5 rounded-lg font-semibold text-sm">Eigen team</button>
+    <button type="button" data-side="opp" class="btn sideBtn ${cls('opp')} py-2.5 rounded-lg font-semibold text-sm">Tegenstander</button>
+  </div>`;
+}
+function playerOptions(teamId, selId, includeEmpty){
+  let o = includeEmpty ? `<option value="">— geen —</option>` : '';
+  o += teamPlayers(teamId).sort((a,b)=>(a.number||99)-(b.number||99))
+       .map(p => `<option value="${p.id}" ${p.id===selId?'selected':''}>${p.number!=null?'#'+p.number+' ':''}${esc(p.name)}</option>`).join('');
+  return o;
+}
+
+/* ------- Opstelling: veld / bank ------- */
+const firstName = (n) => String(n||'').trim().split(/\s+/)[0] || n;
+// "Wouter Smits" -> "W. Smits" (voornaam afgekort). Eén woord blijft heel.
+function shortName(full){
+  const parts = String(full||'').trim().split(/\s+/);
+  if (parts.length < 2) return full || '';
+  return parts[0].charAt(0).toUpperCase() + '. ' + parts.slice(1).join(' ');
+}
+function timerStartedNow(){ return computeElapsedSeconds() > 0 || TIMER.running; }
+// Zorg dat onField/onBench bestaan en alle spelers bevatten.
+function ensureSquad(m){
+  const all = teamPlayers(m.teamId).map(p=>p.id);
+  if (!Array.isArray(m.onField)) m.onField = (m.lineup||[]).filter(id=>all.includes(id));
+  if (!Array.isArray(m.onBench)) m.onBench = [];
+  const known = new Set([...m.onField, ...m.onBench]);
+  m.onBench = [...m.onBench, ...all.filter(id=>!known.has(id))].filter(id=>all.includes(id));
+  m.onField = m.onField.filter(id=>all.includes(id));
+}
+function fieldPlayerIds(m){
+  const ids = (m && m.onField && m.onField.length) ? m.onField : (m && m.lineup || []);
+  return ids.length ? ids : teamPlayers(currentTeam().id).map(p=>p.id);
+}
+// Slim gesorteerde <option>-lijst: alleen veldspelers, Top 3 + streep + rest A–Z.
+function smartOptions(m, metric, includeEmpty){
+  const statMap = {}; computeStats(currentTeam().id, currentSeason().id).forEach(r=>statMap[r.id]=r);
+  const val = (p) => { const r=statMap[p.id]; if(!r) return 0; return metric==='cards' ? (r.yellow||0)+(r.red||0) : (r[metric]||0); };
+  const players = fieldPlayerIds(m).map(id=>playerById(id)).filter(Boolean);
+  const byMetric = [...players].sort((a,b)=> val(b)-val(a) || a.name.localeCompare(b.name));
+  const top3 = byMetric.slice(0,3); const topIds = new Set(top3.map(p=>p.id));
+  const rest = players.filter(p=>!topIds.has(p.id)).sort((a,b)=>a.name.localeCompare(b.name));
+  const opt = p => `<option value="${p.id}">${p.number!=null?'#'+p.number+' ':''}${esc(p.name)}${val(p)?` · ${val(p)}`:''}</option>`;
+  const label = metric==='goals'?'meeste goals':metric==='assists'?'meeste assists':metric==='minutes'?'meeste minuten':'meeste kaarten';
+  let html = includeEmpty ? `<option value="">— geen —</option>` : '';
+  if (top3.length) html += `<optgroup label="⭐ Top 3 · ${label}">${top3.map(opt).join('')}</optgroup>`;
+  if (rest.length) html += `<optgroup label="────── overige (A–Z) ──────">${rest.map(opt).join('')}</optgroup>`;
+  return html;
+}
+// Alfabetische lijst uit een set ids (voor handmatige wissel).
+function alphaOptions(ids){
+  return ids.map(id=>playerById(id)).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(p=>`<option value="${p.id}">${p.number!=null?'#'+p.number+' ':''}${esc(p.name)}</option>`).join('');
+}
+/* Vrije posities op het veld (x/y in %) + drag tussen veld en bank. */
+function defaultFieldPos(i, total){
+  const perRow = 4, row = Math.floor(i/perRow), col = i%perRow, rows = Math.max(1, Math.ceil(total/perRow));
+  const x = 12 + col * (76/Math.max(1, perRow-1));
+  const y = 16 + row * (66/Math.max(1, rows));
+  return { x: Math.min(90, Math.max(8, x)), y: Math.min(88, Math.max(10, y)) };
+}
+function ensurePositions(m){
+  m.positions = m.positions || {};
+  (m.onField||[]).forEach((id,i)=>{ if(!m.positions[id]) m.positions[id] = defaultFieldPos(i, (m.onField||[]).length); });
+}
+function fieldChipHTML(p, pos){
+  return `<div data-pid="${p.id}" class="lchip select-none flex flex-col items-center" style="position:absolute;left:${pos.x}%;top:${pos.y}%;transform:translate(-50%,-50%);touch-action:none;width:4.6rem;">
+    <div class="w-9 h-9 rounded-full bg-white text-black font-bold text-sm flex items-center justify-center shadow">${p.number??'–'}</div>
+    <div class="text-[9px] leading-tight mt-0.5 w-full text-center truncate text-white" style="text-shadow:0 1px 2px #000">${esc(shortName(p.name))}</div>
+  </div>`;
+}
+function benchChipHTML(p){
+  return `<div data-pid="${p.id}" class="lchip chip select-none rounded-xl px-1.5 py-1.5 flex flex-col items-center w-[4.6rem] bg-black/40" style="touch-action:none;">
+    <div class="w-9 h-9 rounded-full bg-white text-black font-bold text-sm flex items-center justify-center">${p.number??'–'}</div>
+    <div class="text-[9px] leading-tight mt-0.5 w-full text-center truncate">${esc(shortName(p.name))}</div>
+  </div>`;
+}
+function renderLineupBody(){
+  const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
+  ensureSquad(m); ensurePositions(m);
+  const el = document.getElementById('lineupBody'); if(!el) return;
+  const fieldChips = (m.onField||[]).map(id=>{ const p=playerById(id); return p?fieldChipHTML(p, m.positions[id]||defaultFieldPos(0,1)):''; }).join('');
+  const benchChips = (m.onBench||[]).map(id=>{ const p=playerById(id); return p?benchChipHTML(p):''; }).join('') || '<span class="text-neutral-600 text-xs p-2">Bank leeg</span>';
+  const started = timerStartedNow();
+  el.innerHTML = `
+    <p class="text-sm text-neutral-400 mb-1">Sleep spelers <b>vrij op het veld</b>, of tussen veld en bank. ${started?'De wedstrijd loopt: slepen tussen veld en bank = automatisch een <b>wissel</b>.':'Vóór de aftrap = je <b>basisopstelling</b>.'}</p>
+    <div id="subBadge" class="hidden text-green-400 text-sm font-semibold mb-2"></div>
+    <div class="text-[11px] text-neutral-500 mb-1">Veld · ${(m.onField||[]).length}</div>
+    <div id="fieldZone" class="pitch mb-3" style="height:56vh;position:relative;">${fieldChips}</div>
+    <div class="text-[11px] text-neutral-500 mb-1">Bank</div>
+    <div id="benchZone" class="card p-2 flex flex-wrap gap-2 min-h-[72px]">${benchChips}</div>`;
+  attachLineupDrag();
+}
+function attachLineupDrag(){
+  const body = document.getElementById('lineupBody'); if(!body) return;
+  body.querySelectorAll('[data-pid]').forEach(ch => { ch.onpointerdown = (e)=>startLineupDrag(e, ch); });
+}
+function startLineupDrag(e, ch){
+  if (e.button && e.button!==0) return;
+  e.preventDefault();
+  const pid = ch.dataset.pid;
+  const clone = ch.cloneNode(true);
+  Object.assign(clone.style, { position:'fixed', zIndex:'70', pointerEvents:'none', margin:'0', left:e.clientX+'px', top:e.clientY+'px', transform:'translate(-50%,-50%) scale(1.1)', opacity:'0.95' });
+  document.body.appendChild(clone);
+  ch.style.visibility = 'hidden';
+  const move = (ev)=>{ clone.style.left=ev.clientX+'px'; clone.style.top=ev.clientY+'px'; };
+  const up = (ev)=>{ document.removeEventListener('pointermove',move); document.removeEventListener('pointerup',up); clone.remove(); dropLineup(pid, ev.clientX, ev.clientY); };
+  document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+}
+function dropLineup(pid, x, y){
+  const m = DATA.matches.find(z=>z.id===LIVE.matchId); if(!m) return;
+  const pitch = document.getElementById('fieldZone'), bench = document.getElementById('benchZone');
+  if(!pitch||!bench){ return; }
+  const pr = pitch.getBoundingClientRect(), br = bench.getBoundingClientRect();
+  const inPitch = x>=pr.left&&x<=pr.right&&y>=pr.top&&y<=pr.bottom;
+  const inBench = x>=br.left&&x<=br.right&&y>=br.top&&y<=br.bottom;
+  const wasField = (m.onField||[]).includes(pid);
+  const started = timerStartedNow();
+  if(inPitch){
+    const nx = Math.min(94, Math.max(6, (x-pr.left)/pr.width*100));
+    const ny = Math.min(94, Math.max(6, (y-pr.top)/pr.height*100));
+    m.positions = m.positions || {}; m.positions[pid] = { x:nx, y:ny };
+    if(!wasField){
+      m.onBench = (m.onBench||[]).filter(id=>id!==pid);
+      if(!(m.onField||[]).includes(pid)) (m.onField=m.onField||[]).push(pid);
+      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerInId:pid,playerOutId:null}); subBadge(pid,true); }
+      else { m.lineup = (m.onField||[]).slice(); }
+    }
+    commitLineup(m);
+  } else if(inBench){
+    if(wasField){
+      m.onField = (m.onField||[]).filter(id=>id!==pid);
+      if(m.positions) delete m.positions[pid];
+      if(!(m.onBench||[]).includes(pid)) (m.onBench=m.onBench||[]).push(pid);
+      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
+      else { m.lineup = (m.onField||[]).slice(); }
+    }
+    commitLineup(m);
+  } else {
+    renderLineupBody();   // buiten beide zones: terugklappen
+  }
+}
+function subBadge(pid, inbound){ const b=document.getElementById('subBadge'); if(b){ const p=playerById(pid); b.textContent = `${inbound?'▲ in':'▼ uit'}: ${firstName(p?.name||'')} (${liveMin()}')`; b.classList.remove('hidden'); } }
+async function commitLineup(m){
+  renderLineupBody();
+  try { await Database.save(DATA); } catch(e){ console.error(e); }
+  render();
+}
+
+/* Goal-venster (herbruikt door de Goal-knop én de score-+). */
+function openGoalModal(active){
+  const m = DATA.matches.find(x => x.id === LIVE.matchId);
+  openModal(`Goal – ${liveMin()}'`,
+    sideToggle(active) +
+    `<div class="sideOwn ${active==='opp'?'hidden':''}">
+      ${field('Wie scoorde?', `<select id="f_scorer" class="w-full mt-1 py-3 px-3">${smartOptions(m,'goals')}</select>`)}
+      ${field('Assist (optioneel)', `<select id="f_assist" class="w-full mt-1 py-3 px-3">${smartOptions(m,'assists',true)}</select>`)}
+    </div>
+    <div class="sideOpp ${active==='opp'?'':'hidden'}">
+      ${field('Speler tegenstander (optioneel)', inp('f_oppname','Naam of rugnummer'))}
+    </div>`,
+    `<button data-act="saveGoal" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Goal opslaan</button>`);
+}
+
+// Welke kant (own/opp) hoort bij een score-kolom (home/away)?
+function columnSide(m, colSide){
+  const ourHome = m.homeAway !== 'Uit';
+  return ((colSide==='home') === ourHome) ? 'own' : 'opp';
+}
+
+/* ==================================================================
+   BINDING
+   ================================================================== */
+function bind(){
+  document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { goto(b.dataset.nav); });
+  document.querySelectorAll('#teamSel').forEach(el => el.onchange = () => { PREFS.teamId = el.value; savePrefs(); render(); });
+  document.querySelectorAll('#seasonSel').forEach(el => el.onchange = () => { PREFS.seasonId = el.value; savePrefs(); render(); });
+  document.querySelectorAll('#logoInput').forEach(el => el.onchange = handleLogoFile);
+  app.querySelectorAll('[data-act]').forEach(b => b.onclick = () => handleAct(b.dataset.act, b.dataset));
+  app.querySelectorAll('[data-sort]').forEach(b => b.onclick = () => { PREFS.sortKey = b.dataset.sort; savePrefs(); render(); });
+}
+function bindModal(){
+  modalRoot.querySelectorAll('[data-act]').forEach(b => b.onclick = () => handleAct(b.dataset.act, b.dataset));
+  modalRoot.querySelectorAll('.sideBtn').forEach(b => b.onclick = () => {
+    const side = b.dataset.side;
+    const hid = document.getElementById('f_sideVal'); if (hid) hid.value = side;
+    modalRoot.querySelectorAll('.sideBtn').forEach(x => {
+      const on = x.dataset.side === side;
+      x.classList.toggle('bg-green-600', on); x.classList.toggle('bg-[#262626]', !on);
+    });
+    const own = modalRoot.querySelector('.sideOwn'), opp = modalRoot.querySelector('.sideOpp');
+    if (own) own.classList.toggle('hidden', side!=='own');
+    if (opp) opp.classList.toggle('hidden', side!=='opp');
+  });
+}
+function sideVal(){ const el=document.getElementById('f_sideVal'); return el?el.value:'own'; }
+
+async function handleAct(act, ds){
+  const t = currentTeam(), s = currentSeason();
+  switch(act){
+    case 'closeModal': return closeModal();
+    case 'gotoSettings': return goto('settings');
+    case 'toggleTheme': { PREFS.theme = (PREFS.theme==='light') ? 'dark' : 'light'; savePrefs(); applyTheme(); return render(); }
+
+    /* ----- Auth & rollen ----- */
+    case 'logout': { if (auth) await auth.signOut(); return; }
+    case 'copyInvite': {
+      const link = inviteLink();
+      try { await navigator.clipboard.writeText(link); alert('Invite-link gekopieerd:\n' + link); }
+      catch(e){ const el=document.getElementById('inviteLinkBox'); if(el){ el.focus(); el.select(); } alert('Kopiëren lukte niet automatisch — selecteer de link en kopieer handmatig.'); }
+      return;
+    }
+    case 'loadMembers': { MEMBERS_LOADED = true; return loadMembers(); }
+    case 'toggleRole': {
+      if (!isAdmin() || !db) return;
+      const newRole = ds.role;   // 'admin' of 'viewer'
+      if (CURRENT_USER && ds.uid===CURRENT_USER.uid && newRole==='viewer'
+          && !confirm('Je haalt je EIGEN adminrechten weg. Zeker weten?')) return;
+      try { await db.collection('users').doc(ds.uid).set({ role: newRole }, { merge:true }); }
+      catch (e){ alert('Rol wijzigen mislukt (geen rechten?).'); return; }
+      // Als ik mezelf wijzig, verandert mijn eigen rol direct mee:
+      if (CURRENT_USER && ds.uid===CURRENT_USER.uid) USER_ROLE = newRole;
+      return loadMembers();
+    }
+
+    /* ----- Teams & seizoenen ----- */
+    case 'addTeam':
+      return openModal('Nieuw team', field('Teamnaam', inp('f_name','Bijv. Heren 1, O19')),
+        `<button data-act="saveTeam" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    case 'saveTeam': {
+      const name = document.getElementById('f_name').value.trim(); if (!name) return;
+      const team = { id: uid(), name }; DATA.teams.push(team); PREFS.teamId = team.id;
+      if (!DATA.seasons.length){ const yr = new Date().getFullYear(); const se = { id: uid(), name: `${yr}/${yr+1}` }; DATA.seasons.push(se); PREFS.seasonId = se.id; }
+      savePrefs(); closeModal(); return commit();
+    }
+    case 'renameTeam':
+      if (!t) return;
+      return openModal('Team hernoemen', field('Teamnaam', inp('f_name','','text', t.name)),
+        `<button data-act="saveRenameTeam" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    case 'saveRenameTeam': {
+      const name = document.getElementById('f_name').value.trim(); if (name && t) t.name = name;
+      closeModal(); return commit();
+    }
+    case 'addSeason':
+      return openModal('Nieuw seizoen', field('Seizoen', inp('f_name', 'Bijv. 2026/2027')),
+        `<button data-act="saveSeason" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    case 'saveSeason': {
+      const name = document.getElementById('f_name').value.trim(); if (!name) return;
+      const se = { id: uid(), name }; DATA.seasons.push(se); PREFS.seasonId = se.id; savePrefs(); closeModal(); return commit();
+    }
+
+    /* ----- Spelers & staf ----- */
+    case 'addPlayer':
+    case 'addStaff': {
+      const isStaff = act==='addStaff';
+      return openModal(isStaff?'Nieuw staflid':'Nieuwe speler',
+        field('Naam', inp('f_name','Voor- en achternaam')) +
+        (isStaff ? field('Rol', inp('f_pos','Bijv. Trainer, Leider, Verzorger'))
+                 : field('Rugnummer', inp('f_num','Bijv. 10','number')) +
+                   field('Positie', `<select id="f_pos" class="w-full mt-1 py-3 px-3">${['Keeper','Verdediger','Middenvelder','Aanvaller'].map(p=>`<option>${p}</option>`).join('')}</select>`)),
+        `<button data-act="savePlayer" data-staff="${isStaff?1:0}" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    }
+    case 'savePlayer': {
+      const name = document.getElementById('f_name').value.trim(); if (!name || !t) return;
+      const isStaff = ds.staff==='1'; const numEl = document.getElementById('f_num');
+      DATA.players.push({ id: uid(), teamId: t.id, name, isStaff,
+        number: (!isStaff && numEl && numEl.value!=='') ? parseInt(numEl.value) : null,
+        position: document.getElementById('f_pos').value.trim() });
+      closeModal(); return commit();
+    }
+    case 'bulkAdd':
+      return openModal('Meerdere toevoegen',
+        field('Type', `<select id="f_bulktype" class="w-full mt-1 py-3 px-3"><option value="player">Spelers</option><option value="staff">Staf</option></select>`) +
+        `<label class="block mb-2"><span class="text-sm text-neutral-400">Namen (één per regel)</span>
+          <textarea id="f_bulk" rows="8" placeholder="Jan Jansen&#10;Piet de Vries&#10;Kees Bakker" class="w-full mt-1 py-3 px-3"></textarea></label>
+         <p class="text-xs text-neutral-500">Alleen namen nodig. Rugnummer, positie of rol vul je daarna per persoon aan met het potloodje.</p>`,
+        `<button data-act="saveBulk" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Toevoegen</button>`);
+    case 'saveBulk': {
+      if (!t) return;
+      const isStaff = document.getElementById('f_bulktype').value === 'staff';
+      const names = document.getElementById('f_bulk').value.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
+      if (!names.length){ alert('Geen namen ingevuld.'); return; }
+      for (const name of names){
+        DATA.players.push({ id: uid(), teamId: t.id, name, isStaff, number: null, position: isStaff ? '' : '' });
+      }
+      closeModal(); alert(`${names.length} ${isStaff?'staflid(en)':'speler(s)'} toegevoegd.`); return commit();
+    }
+    case 'removeLogo': {
+      if (t){ delete t.logo; return commit(); }
+      return;
+    }
+    case 'editPlayer': {
+      const p = playerById(ds.id); if (!p) return;
+      if (p.isStaff){
+        return openModal('Staflid bewerken',
+          field('Naam', inp('f_name','','text', p.name)) + field('Rol', inp('f_pos','Bijv. Trainer','text', p.position||'')),
+          `<button data-act="updatePlayer" data-id="${p.id}" data-staff="1" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+      }
+      return openModal('Speler bewerken',
+        field('Naam', inp('f_name','',  'text', p.name)) + field('Rugnummer', inp('f_num','','number', p.number??'')) +
+        field('Positie', `<select id="f_pos" class="w-full mt-1 py-3 px-3">${['Keeper','Verdediger','Middenvelder','Aanvaller'].map(x=>`<option ${x===p.position?'selected':''}>${x}</option>`).join('')}</select>`),
+        `<button data-act="updatePlayer" data-id="${p.id}" data-staff="0" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    }
+    case 'updatePlayer': {
+      const p = playerById(ds.id); if (!p) return;
+      p.name = document.getElementById('f_name').value.trim() || p.name;
+      if (ds.staff==='1'){ p.position = document.getElementById('f_pos').value.trim(); }
+      else { const n = document.getElementById('f_num').value; p.number = n!==''?parseInt(n):null; p.position = document.getElementById('f_pos').value; }
+      closeModal(); return commit();
+    }
+    case 'delPlayer': {
+      const p = playerById(ds.id);
+      if (!confirm(`Weet je zeker dat je dit ${p&&p.isStaff?'staflid':'speler'} wilt verwijderen?`)) return;
+      DATA.players = DATA.players.filter(x => x.id !== ds.id); return commit();
+    }
+
+    /* ----- Wedstrijden ----- */
+    case 'addMatch': {
+      if (!s) { alert('Maak eerst een seizoen aan bij Instellingen.'); return; }
+      return openModal('Nieuwe wedstrijd',
+        field('Tegenstander', inp('f_opp','Bijv. Voorst 3')) +
+        `<div class="grid grid-cols-2 gap-2">${field('Datum', inp('f_date','','date', new Date().toISOString().slice(0,10)))}${field('Tijd', inp('f_time','','time','10:00'))}</div>` +
+        `<div class="grid grid-cols-2 gap-2">${field('Thuis/Uit', `<select id="f_ha" class="w-full mt-1 py-3 px-3"><option>Thuis</option><option>Uit</option></select>`)}${field('Type', `<select id="f_type" class="w-full mt-1 py-3 px-3"><option>Competitie</option><option>Beker</option><option>Oefen</option></select>`)}</div>`,
+        `<button data-act="saveMatch" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    }
+    case 'saveMatch': {
+      const opp = document.getElementById('f_opp').value.trim(); if (!opp) return;
+      DATA.matches.push({ id: uid(), teamId: t.id, seasonId: s.id, opponent: opp,
+        date: document.getElementById('f_date').value, time: document.getElementById('f_time').value,
+        homeAway: document.getElementById('f_ha').value, type: document.getElementById('f_type').value,
+        status: 'Gepland', homeScore: 0, awayScore: 0, length: 90, lineup: [], events: [] });
+      closeModal(); return commit();
+    }
+    case 'delMatch': {
+      if (!confirm('Weet je zeker dat je deze wedstrijd wilt verwijderen?')) return;
+      DATA.matches = DATA.matches.filter(m => m.id !== ds.id); return commit();
+    }
+    case 'editPlayed': {
+      if (!confirm('Weet je het zeker?')) return;
+      return handleAct('startLive', { id: ds.id });
+    }
+    case 'importICS':
+      return openModal('ICS-agenda importeren',
+        `<p class="text-sm text-neutral-400 mb-3">Kies een .ics-bestand. Wedstrijden worden aan het huidige team &amp; seizoen toegevoegd.</p>
+         <input id="f_ics" type="file" accept=".ics,text/calendar" class="w-full text-sm mb-2">
+         <p class="text-xs text-neutral-500">Tegenstander en thuis/uit worden zo goed mogelijk geraden uit de titel.</p>`,
+        `<button data-act="doImportICS" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Importeren</button>`);
+    case 'doImportICS': {
+      const f = document.getElementById('f_ics').files[0]; if (!f){ alert('Geen bestand gekozen.'); return; }
+      const evs = parseICS(await f.text()); if (!evs.length){ alert('Geen wedstrijden gevonden in dit bestand.'); return; }
+      let added = 0;
+      for (const ev of evs){
+        const g = guessOpponent(ev.summary);
+        DATA.matches.push({ id: uid(), teamId: t.id, seasonId: s.id, opponent: g.opponent, date: ev.date, time: ev.time,
+          homeAway: g.homeAway, type: 'Competitie', status: 'Gepland', homeScore: 0, awayScore: 0, length: 90, lineup: [], events: [] });
+        added++;
+      }
+      closeModal(); alert(`${added} wedstrijd(en) geïmporteerd.`); return commit();
+    }
+
+    /* ----- Live tracker ----- */
+    case 'startLive': {
+      const m = DATA.matches.find(x => x.id === ds.id); if (!m) return;
+      // Andere wedstrijd geopend? Abonneer op de timer van die wedstrijd.
+      if (LIVE.matchId !== m.id){
+        LIVE.matchId = m.id;
+        if (db){ subscribeTimer(m.id); }
+        else { TIMER = { startTimeMs:null, accumulatedMs:0, half:1, running:false }; stopDisplayTick(); }
+      }
+      PREFS.teamId = m.teamId; PREFS.seasonId = m.seasonId; savePrefs();
+      return goto('live');
+    }
+    case 'closeLive': {
+      // Alleen de pagina verlaten; timer blijft lopen tot pauze of afronden
+      return goto('agenda');
+    }
+
+    /* Score + : open Goal-venster voor het juiste team */
+    case 'goalPlus': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openGoalModal(columnSide(m, ds.side));
+    }
+    /* Score − : verwijder chronologisch laatste doelpunt van dat team */
+    case 'goalMinus': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      const side = columnSide(m, ds.side);              // 'own' | 'opp'
+      const scoreKey = ds.side==='home' ? 'homeScore' : 'awayScore';
+      for (let i = m.events.length-1; i>=0; i--){
+        if (m.events[i].type==='goal' && (m.events[i].team||'own')===side){ m.events.splice(i,1); break; }
+      }
+      m[scoreKey] = Math.max(0, (m[scoreKey]||0) - 1);
+      return commit();
+    }
+
+    case 'timerToggle': return TIMER.running ? timerPause() : timerStart();
+    case 'timerPlus':   return timerAdjust(60000);
+    case 'timerMinus':  return timerAdjust(-60000);
+    case 'firstHalf':   return timerSetHalf(1);
+    case 'secondHalf':  return timerSetHalf(2);
+
+    /* --- GOAL --- */
+    case 'logGoal': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openGoalModal('own');
+    }
+    case 'saveGoal': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      const opp = sideVal()==='opp'; const ourHome = m.homeAway!=='Uit';
+      if (opp){
+        m.events.push({ id: uid(), type:'goal', minute: liveMin(), team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null });
+        m[ourHome?'awayScore':'homeScore'] = (m[ourHome?'awayScore':'homeScore']||0)+1;
+      } else {
+        const scorer = document.getElementById('f_scorer').value;
+        const assist = document.getElementById('f_assist').value || null;
+        if (assist && assist===scorer){ alert('Een speler kan geen assist op zichzelf geven.'); return; }
+        m.events.push({ id: uid(), type:'goal', minute: liveMin(), team:'own', playerId: scorer, assistId: assist });
+        m[ourHome?'homeScore':'awayScore'] = (m[ourHome?'homeScore':'awayScore']||0)+1;
+      }
+      closeModal(); return commit();
+    }
+
+    /* --- KAART --- */
+    case 'logCard': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openModal(`Kaart – ${liveMin()}'`,
+        sideToggle('own') +
+        `<div class="sideOwn">${field('Speler (op het veld)', `<select id="f_pl" class="w-full mt-1 py-3 px-3">${smartOptions(m,'cards')}</select>`)}</div>
+         <div class="sideOpp hidden">${field('Speler tegenstander (optioneel)', inp('f_oppname','Naam of rugnummer'))}</div>` +
+        field('Type', `<div class="grid grid-cols-2 gap-2 mt-1">
+          <label class="btn card p-3 text-center cursor-pointer"><input type="radio" name="ct" value="Geel" checked class="hidden"><span>🟨 Gele kaart</span></label>
+          <label class="btn card p-3 text-center cursor-pointer"><input type="radio" name="ct" value="Rood" class="hidden"><span>🟥 Rode kaart</span></label>
+        </div>`),
+        `<button data-act="saveCard" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Kaart opslaan</button>`);
+    }
+    case 'saveCard': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      const ct = modalRoot.querySelector('input[name=ct]:checked').value;
+      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'card', minute: liveMin(), team:'opp', cardType: ct, oppName: document.getElementById('f_oppname').value.trim() || null }); }
+      else { m.events.push({ id: uid(), type:'card', minute: liveMin(), team:'own', cardType: ct, playerId: document.getElementById('f_pl').value }); }
+      closeModal(); return commit();
+    }
+
+    /* --- WISSEL --- */
+    case 'logSub': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      return openModal(`Wissel – ${liveMin()}'`,
+        sideToggle('own') +
+        `<div class="sideOwn">
+          <p class="text-xs text-neutral-500 mb-2">Tip: je kunt ook direct slepen op het veld (Opstelling). Dat legt de wissel automatisch vast.</p>
+          ${field('Speler UIT (▼, van het veld)', `<select id="f_out" class="w-full mt-1 py-3 px-3">${alphaOptions(fieldPlayerIds(m))}</select>`)}
+          ${field('Speler IN (▲, van de bank)', `<select id="f_in" class="w-full mt-1 py-3 px-3">${alphaOptions((m.onBench&&m.onBench.length)?m.onBench:teamPlayers(t.id).map(p=>p.id))}</select>`)}
+        </div>
+        <div class="sideOpp hidden">${field('Toelichting tegenstander (optioneel)', inp('f_oppname','Bijv. #7 → #14'))}</div>`,
+        `<button data-act="saveSub" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Wissel opslaan</button>`);
+    }
+    case 'saveSub': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'sub', minute: liveMin(), team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null }); }
+      else {
+        const out = document.getElementById('f_out').value, inId = document.getElementById('f_in').value;
+        if (out===inId){ alert('Kies twee verschillende spelers.'); return; }
+        m.events.push({ id: uid(), type:'sub', minute: liveMin(), team:'own', playerOutId: out, playerInId: inId });
+      }
+      closeModal(); return commit();
+    }
+    case 'delEvent': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      m.events = m.events.filter(e => e.id !== ds.id); return commit();
+    }
+    case 'lineup': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      openModal('Opstelling', `<div id="lineupBody"></div>`,
+        `<div class="grid grid-cols-2 gap-2 mt-3">
+           <button data-act="clearLineup" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold text-red-300">Leeg veld</button>
+           <button data-act="closeModal" class="btn bg-green-600 py-3 rounded-xl font-bold">Klaar</button>
+         </div>`);
+      renderLineupBody();
+      return;
+    }
+    case 'clearLineup': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      if (!confirm('Alle spelers van het veld naar de bank verplaatsen?')) return;
+      const all = teamPlayers(m.teamId).map(p=>p.id);
+      m.onField = []; m.positions = {};
+      m.onBench = all.slice();
+      if (!timerStartedNow()) m.lineup = [];
+      renderLineupBody();
+      try { await Database.save(DATA); } catch(e){ console.error(e); }
+      return render();
+    }
+    case 'finishMatch': {
+      const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
+      if (m.status !== 'Gespeeld'){
+        const secs = computeElapsedSeconds();
+        m.status = 'Gespeeld'; m.playedSeconds = secs; if (secs > 0) m.length = Math.round(secs/60);
+        // Timer stoppen (pauzeren) in Firebase, zodat de eindtijd vaststaat.
+        if (db){ try { await timerRef().set({ accumulatedMs: secs*1000, startTime: null, running:false }, { merge:true }); } catch(e){} }
+        else { TIMER.running=false; TIMER.startTimeMs=null; stopDisplayTick(); }
+      } else { m.status = 'Gepland'; }
+      return commit();
+    }
+    case 'shotTimeline': return shotTimeline();
+
+    /* ----- Export / backup ----- */
+    case 'exportCSV': return exportCSV(t, s);
+    case 'printTable': return printOrShot(document.getElementById('printArea'), `statistieken_${t.name}_${s.name}`);
+    case 'exportData': {
+      const stamp = new Date().toISOString().slice(0,10);
+      downloadBlob(new Blob([JSON.stringify(DATA,null,2)], {type:'application/json'}), `teamstats-backup_${stamp}.json`);
+      return;
+    }
+    case 'importData':
+      return openModal('Data importeren',
+        `<p class="text-sm text-neutral-400 mb-3"><b class="text-red-400">Let op:</b> dit vervangt ál je huidige data door de inhoud van het back-upbestand.</p>
+         <input id="f_backup" type="file" accept=".json,application/json" class="w-full text-sm">`,
+        `<button data-act="doImportData" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Importeren en vervangen</button>`);
+    case 'doImportData': {
+      const f = document.getElementById('f_backup').files[0]; if (!f){ alert('Geen bestand gekozen.'); return; }
+      let parsed; try { parsed = JSON.parse(await f.text()); } catch(e){ alert('Ongeldig bestand (geen geldige JSON).'); return; }
+      if (!parsed || !Array.isArray(parsed.teams) || !Array.isArray(parsed.seasons) || !Array.isArray(parsed.players) || !Array.isArray(parsed.matches)){
+        alert('Dit lijkt geen geldig TeamStats back-upbestand.'); return;
+      }
+      if (!confirm('Weet je zeker dat je de huidige data wilt vervangen?')) return;
+      DATA = parsed;
+      PREFS.teamId = DATA.teams[0]?.id; PREFS.seasonId = DATA.seasons[0]?.id; savePrefs();
+      closeModal(); alert('Data geïmporteerd.'); return commit();
+    }
+  }
+}
+
+/* ==================================================================
+   TIMER – bron van de waarheid staat in Firebase (collectie 'timers')
+   ------------------------------------------------------------------
+   Per wedstrijd 1 document: timers/{matchId} met velden
+     startTime      : server-timestamp van de laatste 'start' (of null bij pauze)
+     accumulatedMs  : opgebouwde tijd tot de laatste pauze (ms)
+     half           : 1 of 2
+     running        : true/false
+   Verstreken tijd op het scherm = accumulatedMs + (nu - startTime).
+   Alleen admins schrijven; iedereen leest en ziet dezelfde tijd live.
+   Zonder Firebase (lokaal) werkt dezelfde logica met de lokale klok.
+   ================================================================== */
+let TIMER = { startTimeMs:null, accumulatedMs:0, half:1, running:false };
+let TIMER_UNSUB = null;   // Firestore-listener
+let TIMER_TICK = null;    // scherm-ticker (1x per seconde)
+
+function timerRef(){ return db.collection('timers').doc(LIVE.matchId); }
+function computeElapsedSeconds(){
+  let ms = TIMER.accumulatedMs || 0;
+  if (TIMER.running && TIMER.startTimeMs) ms += Date.now() - TIMER.startTimeMs;
+  return Math.max(0, Math.floor(ms/1000));
+}
+function refreshTimerDisplay(){
+  LIVE.half = TIMER.half || 1;
+  LIVE.seconds = computeElapsedSeconds();
+  LIVE.running = !!TIMER.running;
+  const el = document.getElementById('timerDisplay');
+  if (el) el.innerHTML = timerHTML();
+}
+function startDisplayTick(){ if (TIMER_TICK) return; TIMER_TICK = setInterval(refreshTimerDisplay, 1000); }
+function stopDisplayTick(){ if (TIMER_TICK){ clearInterval(TIMER_TICK); TIMER_TICK = null; } }
+
+function subscribeTimer(matchId){
+  unsubscribeTimer();
+  if (!db) return;   // lokale modus gebruikt TIMER direct
+  TIMER_UNSUB = db.collection('timers').doc(matchId).onSnapshot(snap => {
+    const d = snap.exists ? snap.data() : null;
+    TIMER = {
+      startTimeMs: d && d.startTime ? (d.startTime.toMillis ? d.startTime.toMillis() : d.startTime) : null,
+      accumulatedMs: (d && d.accumulatedMs) || 0,
+      half: (d && d.half) || 1,
+      running: !!(d && d.running)
+    };
+    refreshTimerDisplay();
+    if (view()==='live') render();   // knoplabels (Start/Pauze) bijwerken
+  }, err => console.error('Timer-listener:', err));
+}
+function unsubscribeTimer(){ if (TIMER_UNSUB){ TIMER_UNSUB(); TIMER_UNSUB = null; } }
+
+async function timerStart(){
+  if (!canEdit()) return;
+  if (db){
+    try { await timerRef().set({
+      startTime: firebase.firestore.FieldValue.serverTimestamp(),
+      accumulatedMs: TIMER.accumulatedMs || 0,
+      half: TIMER.half || 1, running: true
+    }, { merge:true }); } catch(e){ alert('Timer starten mislukt (rechten?).'); }
+  } else { TIMER.running=true; TIMER.startTimeMs=Date.now(); refreshTimerDisplay(); startDisplayTick(); render(); }
+}
+async function timerPause(){
+  if (!canEdit()) return;
+  const elapsedMs = (TIMER.accumulatedMs||0) + (TIMER.running && TIMER.startTimeMs ? (Date.now()-TIMER.startTimeMs) : 0);
+  if (db){
+    try { await timerRef().set({ accumulatedMs: elapsedMs, startTime: null, running:false, half: TIMER.half||1 }, { merge:true }); }
+    catch(e){ alert('Timer pauzeren mislukt (rechten?).'); }
+  } else { TIMER.accumulatedMs=elapsedMs; TIMER.startTimeMs=null; TIMER.running=false; refreshTimerDisplay(); render(); }
+}
+async function timerAdjust(deltaMs){
+  if (!canEdit()) return;
+  let elapsedMs = (TIMER.accumulatedMs||0) + (TIMER.running && TIMER.startTimeMs ? (Date.now()-TIMER.startTimeMs) : 0);
+  elapsedMs = Math.max(0, elapsedMs + deltaMs);
+  if (db){
+    const payload = { accumulatedMs: elapsedMs, half: TIMER.half||1, running: TIMER.running,
+      startTime: TIMER.running ? firebase.firestore.FieldValue.serverTimestamp() : null };
+    try { await timerRef().set(payload, { merge:true }); } catch(e){ alert('Tijd aanpassen mislukt (rechten?).'); }
+  } else { TIMER.accumulatedMs=elapsedMs; if (TIMER.running) TIMER.startTimeMs=Date.now(); refreshTimerDisplay(); render(); }
+}
+async function timerSetHalf(half){
+  if (!canEdit()) return;
+  const baseMs = half===2 ? HALF1_CAP*1000 : 0;
+  if (db){
+    try { await timerRef().set({ half, accumulatedMs: baseMs,
+      startTime: half===2 ? firebase.firestore.FieldValue.serverTimestamp() : null, running: half===2 }, { merge:true }); }
+    catch(e){ alert('Helft wisselen mislukt (rechten?).'); }
+  } else { TIMER.half=half; TIMER.accumulatedMs=baseMs; TIMER.startTimeMs = half===2?Date.now():null; TIMER.running = half===2; refreshTimerDisplay(); render(); }
+}
+
+/* ---------- CSV export ---------- */
+function exportCSV(t, s){
+  const rows = computeStats(t.id, s.id).sort((a,b)=>b.goals-a.goals);
+  const head = ['Speler','Rugnummer','Positie','Gespeeld','Basisplaatsen','Wisselbeurten','Goals','Assists','Geel','Rood','Speelminuten'];
+  const lines = [head.join(';')];
+  for (const r of rows){
+    lines.push([r.name, r.number??'', r.position||'', r.gp, r.starts, r.subIn, r.goals, r.assists, r.yellow, r.red, r.minutes]
+      .map(v => `"${String(v).replace(/"/g,'""')}"`).join(';'));
+  }
+  downloadBlob(new Blob(['﻿'+lines.join('\n')], { type:'text/csv;charset=utf-8;' }), safe(`statistieken_${t.name}_${s.name}`)+'.csv');
+}
+
+/* ---------- Screenshot / print ---------- */
+function printOrShot(el, name){
+  if (window.html2canvas && el){
+    html2canvas(el, { backgroundColor:'#171717', scale:2 }).then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'))).catch(() => window.print());
+  } else { window.print(); }
+}
+function shotTimeline(){
+  const el = document.getElementById('timelineArea');
+  const m = DATA.matches.find(x => x.id === LIVE.matchId);
+  const name = m ? `verloop_${matchTitle(m)}_${m.date}` : 'wedstrijdverloop';
+  if (window.html2canvas && el){
+    html2canvas(el, { backgroundColor:'#171717', scale:2 }).then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'))).catch(() => alert('Screenshot maken lukte niet in deze weergave. Open de app in een browsertabblad.'));
+  } else { alert('Screenshot maken vereist internet (voor html2canvas). Open de app in een browsertabblad.'); }
+}
+function safe(n){ return String(n).replace(/[^\w.\-]+/g,'_'); }
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+/* ==================================================================
+   OPSTARTEN
+   ================================================================== */
+function showSetupBanner(){
+  if (FIREBASE_READY) return;
+  const b = document.createElement('div');
+  b.className = 'bg-red-900 text-red-100 text-xs text-center px-3 py-2';
+  b.innerHTML = '⚠ Firebase nog niet ingesteld — plak je config bovenin de code (zoek op <b>PLAK_HIER</b>). De app werkt nu lokaal op dit toestel.';
+  document.body.prepend(b);
+}
+let APP_STARTED = false;
+async function startApp(){
+  if (APP_STARTED) { render(); return; }   // bij herinloggen niet dubbel abonneren
+  APP_STARTED = true;
+  DATA = await Database.load();
+  Database.subscribe((newData) => { DATA = newData; render(); });
+  render();
+}
+
+async function boot(){
+  applyTheme();
+  showSetupBanner();
+  if (FIREBASE_READY && auth){
+    // Wacht op de inlogstatus. Niet ingelogd -> render() toont het inlogscherm.
+    auth.onAuthStateChanged(async (user) => {
+      CURRENT_USER = user;
+      MEMBERS_LOADED = false;
+      if (!user){ USER_ROLE = null; USER_NAME = null; render(); return; }
+      try {
+        const prof = await ensureUserDoc(user, PENDING_USERNAME);
+        USER_ROLE = prof.role; USER_NAME = prof.username;
+      } catch (e){ console.error(e); USER_ROLE = 'viewer'; USER_NAME = emailToUsername(user.email); }
+      PENDING_USERNAME = null;
+      startApp();
+    });
+    render();   // toont alvast het inlogscherm terwijl Firebase de sessie checkt
+  } else {
+    // Lokale modus (geen Firebase): meteen starten, alles bewerkbaar.
+    startApp();
+  }
+}
+boot();
+</script>
+</body>
+</html>
