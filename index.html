@@ -1882,19 +1882,24 @@ function matchReportData(m){
   }).filter(Boolean).join('\n');
   return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\nNotities: ${m.notes||'-'}\nGebeurtenissen:\n${evs||'-'}`;
 }
-// Vraag Google welke modellen deze sleutel mag gebruiken en kies een geschikt (flash) model.
-async function pickGeminiModel(key){
+// Vraag Google welke modellen deze sleutel mag gebruiken; geef een gesorteerde lijst
+// kandidaten terug (flash-modellen eerst, nieuwste versie eerst).
+async function geminiCandidates(key){
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`);
   const j = await res.json().catch(()=>null);
   if (!res.ok){ throw new Error((j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status)); }
   const models = (j && j.models || []).filter(mo => (mo.supportedGenerationMethods||[]).includes('generateContent'));
   if (!models.length) throw new Error('Geen model beschikbaar dat samenvattingen kan maken voor deze sleutel.');
   const name = (mo)=>mo.name||'';
-  // Voorkeur: flash-model (snel + gratis), anders het eerste dat werkt.
-  const flash = models.find(mo => /flash/.test(name(mo)) && !/vision|thinking|image/.test(name(mo)))
-             || models.find(mo => /gemini/.test(name(mo)))
-             || models[0];
-  return flash.name; // bijv. "models/gemini-2.0-flash"
+  const ver = (mo)=>{ const mm = name(mo).match(/gemini-(\d+(?:\.\d+)?)/); return mm?parseFloat(mm[1]):0; };
+  const score = (mo)=>{
+    let s = ver(mo)*10;
+    if (/flash/.test(name(mo))) s += 5;                          // flash: snel + goedkoop
+    if (/vision|image|thinking|embedding|tts|audio/.test(name(mo))) s -= 100; // ongeschikt
+    if (/latest/.test(name(mo))) s += 1;
+    return s;
+  };
+  return models.slice().sort((a,b)=>score(b)-score(a)).map(name); // ["models/gemini-3.6-flash", ...]
 }
 async function generateReport(){
   const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
@@ -1903,17 +1908,23 @@ async function generateReport(){
   const prompt = `Schrijf een korte, leuke Nederlandse wedstrijdsamenvatting (2 tot 4 zinnen, enthousiaste amateurvoetbal-toon). Gebruik uitsluitend onderstaande gegevens; verzin geen feiten.\n\n${matchReportData(m)}`;
   const btn = [...document.querySelectorAll('[data-act="generateReport"]')][0];
   if (btn){ btn.textContent = '⏳ Bezig…'; btn.style.pointerEvents='none'; }
+  let lastErr = '';
   try {
-    const modelName = await pickGeminiModel(key);   // "models/…"
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] })
-    });
-    const j = await res.json().catch(()=>null);
-    if (!res.ok) throw new Error((j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status));
-    const txt = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0] && j.candidates[0].content.parts[0].text;
-    if (!txt || !txt.trim()) throw new Error('Leeg antwoord van AI.');
-    pushUndo(m); m.report = txt.trim(); return commit();
+    const candidates = await geminiCandidates(key);
+    for (const modelName of candidates.slice(0, 6)){   // probeer de beste paar tot er één werkt
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] })
+        });
+        const j = await res.json().catch(()=>null);
+        if (!res.ok){ lastErr = (j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status); continue; }
+        const txt = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0] && j.candidates[0].content.parts[0].text;
+        if (txt && txt.trim()){ pushUndo(m); m.report = txt.trim(); return commit(); }
+        lastErr = 'Leeg antwoord van AI.';
+      } catch(e){ lastErr = e.message || 'netwerkfout'; }
+    }
+    throw new Error(lastErr || 'Geen werkend model gevonden.');
   } catch(e){
     pushUndo(m); m.report = buildAutoReport(m); await commit();
     alert('AI-verslag lukte niet, automatische samenvatting gebruikt.\n\nReden: ' + (e.message||e) +
