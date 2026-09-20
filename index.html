@@ -1882,33 +1882,43 @@ function matchReportData(m){
   }).filter(Boolean).join('\n');
   return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\nNotities: ${m.notes||'-'}\nGebeurtenissen:\n${evs||'-'}`;
 }
-const GEMINI_MODELS = ['gemini-2.0-flash','gemini-flash-latest','gemini-1.5-flash'];
+// Vraag Google welke modellen deze sleutel mag gebruiken en kies een geschikt (flash) model.
+async function pickGeminiModel(key){
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`);
+  const j = await res.json().catch(()=>null);
+  if (!res.ok){ throw new Error((j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status)); }
+  const models = (j && j.models || []).filter(mo => (mo.supportedGenerationMethods||[]).includes('generateContent'));
+  if (!models.length) throw new Error('Geen model beschikbaar dat samenvattingen kan maken voor deze sleutel.');
+  const name = (mo)=>mo.name||'';
+  // Voorkeur: flash-model (snel + gratis), anders het eerste dat werkt.
+  const flash = models.find(mo => /flash/.test(name(mo)) && !/vision|thinking|image/.test(name(mo)))
+             || models.find(mo => /gemini/.test(name(mo)))
+             || models[0];
+  return flash.name; // bijv. "models/gemini-2.0-flash"
+}
 async function generateReport(){
   const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
   const key = (PREFS.geminiKey||'').trim();
   if (!key){ pushUndo(m); m.report = buildAutoReport(m); return commit(); }
   const prompt = `Schrijf een korte, leuke Nederlandse wedstrijdsamenvatting (2 tot 4 zinnen, enthousiaste amateurvoetbal-toon). Gebruik uitsluitend onderstaande gegevens; verzin geen feiten.\n\n${matchReportData(m)}`;
-  // Toon dat we bezig zijn.
   const btn = [...document.querySelectorAll('[data-act="generateReport"]')][0];
   if (btn){ btn.textContent = '⏳ Bezig…'; btn.style.pointerEvents='none'; }
-  let lastErr = '';
-  for (const model of GEMINI_MODELS){
-    try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] })
-      });
-      const j = await res.json().catch(()=>null);
-      if (!res.ok){ lastErr = (j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status); continue; }
-      const txt = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0] && j.candidates[0].content.parts[0].text;
-      if (txt && txt.trim()){ pushUndo(m); m.report = txt.trim(); return commit(); }
-      lastErr = 'Leeg antwoord van AI.';
-    } catch(e){ lastErr = e.message || 'netwerkfout'; }
+  try {
+    const modelName = await pickGeminiModel(key);   // "models/…"
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] })
+    });
+    const j = await res.json().catch(()=>null);
+    if (!res.ok) throw new Error((j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status));
+    const txt = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0] && j.candidates[0].content.parts[0].text;
+    if (!txt || !txt.trim()) throw new Error('Leeg antwoord van AI.');
+    pushUndo(m); m.report = txt.trim(); return commit();
+  } catch(e){
+    pushUndo(m); m.report = buildAutoReport(m); await commit();
+    alert('AI-verslag lukte niet, automatische samenvatting gebruikt.\n\nReden: ' + (e.message||e) +
+      '\n\nControleer: 1) sleutel juist gekopieerd, 2) bij je sleutel is de "Generative Language API" ingeschakeld, 3) geen sleutel-restrictie die jouw domein blokkeert.');
   }
-  // Niets gelukt -> automatisch verslag + duidelijke melding waarom.
-  pushUndo(m); m.report = buildAutoReport(m); await commit();
-  alert('AI-verslag lukte niet, automatische samenvatting gebruikt.\n\nReden: ' + lastErr +
-    '\n\nControleer: 1) sleutel juist gekopieerd, 2) bij je sleutel in Google AI Studio de "Generative Language API" aan staat, 3) geen HTTP-referrer-restrictie die jouw GitHub-domein blokkeert.');
 }
 
 /* ==================================================================
