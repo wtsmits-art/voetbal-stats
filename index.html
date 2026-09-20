@@ -1213,8 +1213,13 @@ function ensureSquad(m){
   if (!Array.isArray(m.onBench)) m.onBench = [];
   if (!Array.isArray(m.onAbsent)) m.onAbsent = [];
   const known = new Set([...m.onField, ...m.onBench, ...m.onAbsent]);
-  m.onBench = [...m.onBench, ...all.filter(id=>!known.has(id))].filter(id=>all.includes(id));
+  // Nieuwe/niet-ingedeelde spelers: gasten -> automatisch "niet aanwezig", rest -> bank.
+  all.filter(id=>!known.has(id)).forEach(id => {
+    if (playerGroup(playerById(id)) === 'gast') m.onAbsent.push(id);
+    else m.onBench.push(id);
+  });
   m.onField = m.onField.filter(id=>all.includes(id));
+  m.onBench = m.onBench.filter(id=>all.includes(id));
   m.onAbsent = m.onAbsent.filter(id=>all.includes(id));
 }
 function fieldPlayerIds(m){
