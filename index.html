@@ -1746,13 +1746,54 @@ function buildAutoReport(m){
 }
 function matchReportData(m){
   const t = currentTeam();
-  const evs = (m.events||[]).slice().sort((a,b)=>a.minute-b.minute).map(e=>{
-    if (e.type==='goal') return `${e.minute}' DOELPUNT ${e.team==='opp'?'tegenstander':displayName(e.playerId)}${e.assistId?` (assist ${displayName(e.assistId)})`:''}${e.bodyPart?` [${e.bodyPart}]`:''}`;
-    if (e.type==='card') return `${e.minute}' ${e.cardType} kaart ${e.team==='opp'?'tegenstander':displayName(e.playerId)}`;
-    if (e.type==='sub') return `${e.minute}' wissel ${e.team==='opp'?'tegenstander':`${e.playerInId?displayName(e.playerInId)+' in':''}${e.playerOutId?', '+displayName(e.playerOutId)+' uit':''}`}`;
-    return '';
+  const s = currentSeason();
+  
+  // 1. Seizoensstatistieken verzamelen voor context (topscorers, meeste assists)
+  const stats = (t && s) ? computeStats(t.id, s.id) : [];
+  const sortedGoals = [...stats].sort((a,b)=>b.goals-a.goals);
+  const sortedAssists = [...stats].sort((a,b)=>b.assists-a.assists);
+  
+  const statsContext = stats.map(p => {
+    if (p.goals === 0 && p.assists === 0) return null;
+    const gRank = sortedGoals.findIndex(x=>x.id===p.id) + 1;
+    const aRank = sortedAssists.findIndex(x=>x.id===p.id) + 1;
+    return `${p.name}: dit seizoen ${p.goals} goals (plek ${gRank} in team) en ${p.assists} assists (plek ${aRank} in team)`;
   }).filter(Boolean).join('\n');
-  return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\nNotities: ${m.notes||'-'}\nGebeurtenissen:\n${evs||'-'}`;
+
+  // 2. Gebeurtenissen uit de wedstrijd verzamelen
+  const chronology = [];
+
+  (m.events||[]).forEach(e => {
+    let txt = '';
+    if (e.type==='goal') txt = `DOELPUNT: ${e.team==='opp'?'tegenstander':displayName(e.playerId)}${e.assistId?` (assist ${displayName(e.assistId)})`:''}${e.bodyPart?` [${e.bodyPart}]`:''}`;
+    else if (e.type==='card') txt = `${e.cardType} kaart voor ${e.team==='opp'?'tegenstander':displayName(e.playerId)}`;
+    else if (e.type==='sub') txt = `Wissel: ${e.team==='opp'?'tegenstander':`${e.playerInId?displayName(e.playerInId)+' in':''}${e.playerOutId?', '+displayName(e.playerOutId)+' uit':''}`}`;
+    
+    if (txt) chronology.push({ minute: e.minute, text: txt });
+  });
+
+  // 3. Notities scannen op minuut-notaties zoals "(12min)" of "(12 min)" of "(12')"
+  if (m.notes && m.notes.trim()) {
+    const lines = m.notes.split('\n');
+    lines.forEach(line => {
+      const match = line.match(/\((\d+)\s*(?:min\vert{}minuut\vert{}')?\)/i);
+      if (match) {
+        const min = parseInt(match[1]);
+        const cleanNote = line.replace(/\(\d+\s*(?:min\vert{}minuut\vert{}')?\)/i, '').trim();
+        chronology.push({ minute: min, text: `Opmerking/Actie: ${cleanNote}` });
+      } else if (line.trim()) {
+        // Algemene notitie zonder minuut
+        chronology.push({ minute: 999, text: `Algemene notitie: ${line.trim()}` });
+      }
+    });
+  }
+
+  // 4. Chronologisch sorteren op minuut
+  chronology.sort((a,b) => a.minute - b.minute);
+
+  const timelineText = chronology.map(c => c.minute === 999 ? `- ${c.text}` : `${c.minute}' ${c.text}`).join('\n');
+
+  return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\n\nSEIZOENSSTATISTIEKEN SPELERS (voor context):\n${statsContext || 'Geen seizoensdata'}\n\nCHRONOLOGISCH WEDSTRIJDVERLOOP & NOTITIES:\n${timelineText || 'Geen acties geregistreerd'}`;
 }
 
 async function geminiCandidates(key){
@@ -1776,7 +1817,19 @@ async function generateReport(){
   const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
   const key = (PREFS.geminiKey||'').trim();
   if (!key){ pushUndo(m); m.report = buildAutoReport(m); return commit(); }
-  const prompt = `Schrijf een korte, leuke Nederlandse wedstrijdsamenvatting (2 tot 4 zinnen, enthousiaste amateurvoetbal-toon). Gebruik uitsluitend onderstaande gegevens; verzin geen feiten.\n\n${matchReportData(m)}`;
+  // Zoek in generateReport() naar: const prompt = ...
+// Vervang die regel door:
+
+const prompt = `Je bent een enthousiaste, ietwat overdreven en humoristische amateurvoetbal-verslaggever. Schrijf een smeuïg en leuk leesbaar wedstrijdverslag (3 tot 5 zinnen). 
+
+Richtlijnen:
+1. Gebruik een vlotte, enthousiaste amateurvoetbal-toon (denk aan Kantine-praat, heldenrol, spektakel). Lichte overdrijving is toegestaan!
+2. Verwerk de chronologische gebeurtenissen en notities op het juiste moment in het verhaal.
+3. Als een speler die scoort of assisteert hoog staat in de seizoensstatistieken (bijv. topscorer, nummer 2, of assistkoning), benoem dit dan op een leuke manier!
+4. Gebruik UITSLUITEND de meegegeven feiten, namen en standen. Verzin geen doelpuntmakers of uitslagen die er niet staan.
+
+WEDSTRIJDGEGEVENS:
+${matchReportData(m)}`;
   const btn = [...document.querySelectorAll('[data-act="generateReport"]')][0];
   if (btn){ btn.textContent = '⏳ Bezig…'; btn.style.pointerEvents='none'; }
   let lastErr = '';
