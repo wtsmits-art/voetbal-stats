@@ -1216,19 +1216,58 @@ function renderLineupBody(){
 }
 function attachLineupDrag(){
   const body = document.getElementById('lineupBody'); if(!body) return;
-  body.querySelectorAll('[data-pid]').forEach(ch => { ch.onpointerdown = (e)=>startLineupDrag(e, ch); });
+  body.querySelectorAll('[data-pid]').forEach(ch => {
+    let startX = 0, startY = 0;
+    
+    ch.onpointerdown = (e) => {
+      startX = e.clientX;
+      startY = e.clientY;
+      startLineupDrag(e, ch, (wasDragged) => {
+        // Als de speler niet gesleept is (minder dan 5px bewogen), verwerken we het als een KLIK
+        if (!wasDragged) {
+          handleChipClick(ch.dataset.pid);
+        }
+      });
+    };
+  });
 }
-function startLineupDrag(e, ch){
+function startLineupDrag(e, ch, onEnd){
   if (e.button && e.button!==0) return;
   e.preventDefault();
   const pid = ch.dataset.pid;
-  const clone = ch.cloneNode(true);
-  Object.assign(clone.style, { position:'fixed', zIndex:'70', pointerEvents:'none', margin:'0', left:e.clientX+'px', top:e.clientY+'px', transform:'translate(-50%,-50%) scale(1.1)', opacity:'0.95' });
-  document.body.appendChild(clone);
-  ch.style.visibility = 'hidden';
-  const move = (ev)=>{ clone.style.left=ev.clientX+'px'; clone.style.top=ev.clientY+'px'; };
-  const up = (ev)=>{ document.removeEventListener('pointermove',move); document.removeEventListener('pointerup',up); clone.remove(); dropLineup(pid, ev.clientX, ev.clientY); };
-  document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+  const startX = e.clientX, startY = e.clientY;
+  let hasDragged = false;
+  let clone = null;
+
+  const move = (ev) => {
+    const dist = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+    if (dist > 5 && !hasDragged) {
+      hasDragged = true;
+      clone = ch.cloneNode(true);
+      Object.assign(clone.style, { position:'fixed', zIndex:'70', pointerEvents:'none', margin:'0', left:ev.clientX+'px', top:ev.clientY+'px', transform:'translate(-50%,-50%) scale(1.1)', opacity:'0.95' });
+      document.body.appendChild(clone);
+      ch.style.visibility = 'hidden';
+    }
+    if (hasDragged && clone) {
+      clone.style.left = ev.clientX + 'px';
+      clone.style.top = ev.clientY + 'px';
+    }
+  };
+
+  const up = (ev) => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    if (hasDragged) {
+      if (clone) clone.remove();
+      dropLineup(pid, ev.clientX, ev.clientY);
+    } else {
+      ch.style.visibility = 'visible';
+    }
+    if (onEnd) onEnd(hasDragged);
+  };
+
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
 }
 function dropLineup(pid, x, y){
   const m = DATA.matches.find(z=>z.id===LIVE.matchId); if(!m) return;
@@ -1299,6 +1338,65 @@ function dropLineup(pid, x, y){
   } 
   else {
     renderLineupBody();
+  }
+}
+  function handleChipClick(pid){
+  const m = DATA.matches.find(z => z.id === LIVE.matchId); if(!m) return;
+  ensureSquad(m);
+  
+  const p = playerById(pid); if (!p) return;
+  const name = firstName(p.name);
+  const wasField = (m.onField||[]).includes(pid);
+  const wasBench = (m.onBench||[]).includes(pid);
+  const fieldCount = (m.onField||[]).length;
+  const started = timerStartedNow();
+
+  const removeFromAll = () => {
+    m.onField = (m.onField||[]).filter(id=>id!==pid);
+    m.onBench = (m.onBench||[]).filter(id=>id!==pid);
+    m.onSelection = (m.onSelection||[]).filter(id=>id!==pid);
+    m.onGuests = (m.onGuests||[]).filter(id=>id!==pid);
+  };
+
+  // 1. Speler staat al in de BASIS -> Vragen: Naar Bank of naar Selectie/Gasten?
+  if (wasField) {
+    if (confirm(`${name} staat in de Basis.\n\nWil je ${name} naar de BANK verplaatsen?\n(Klik op 'Annuleren' om naar Selectie/Gasten te verplaatsen)`)) {
+      pushUndo(m);
+      if (m.positions) delete m.positions[pid];
+      removeFromAll(); (m.onBench=m.onBench||[]).push(pid);
+      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
+    } else {
+      pushUndo(m);
+      if (m.positions) delete m.positions[pid];
+      removeFromAll();
+      if (playerGroup(p) === 'gast') (m.onGuests=m.onGuests||[]).push(pid);
+      else (m.onSelection=m.onSelection||[]).push(pid);
+      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
+    }
+    commitLineup(m);
+    return;
+  }
+
+  // 2. Speler staat NIET in de basis -> Proberen in de BASIS te zetten
+  if (fieldCount < 11) {
+    // Ruimte in de basis! Direct plaatsen op een vrije positie.
+    pushUndo(m);
+    removeFromAll();
+    (m.onField=m.onField||[]).push(pid);
+    ensurePositions(m);
+    if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerInId:pid,playerOutId:null}); subBadge(pid,true); }
+    else { m.lineup = (m.onField||[]).slice(); }
+    commitLineup(m);
+  } else {
+    // Basis is vol (11 spelers) -> Vragen om naar de BANK te verplaatsen
+    if (confirm(`Er staan al 11 spelers in de basis.\n\nWil je ${name} op de BANK zetten?`)) {
+      if (!wasBench) {
+        pushUndo(m);
+        removeFromAll();
+        (m.onBench=m.onBench||[]).push(pid);
+        commitLineup(m);
+      }
+    }
   }
 }
 function subBadge(pid, inbound){ const b=document.getElementById('subBadge'); if(b){ const p=playerById(pid); b.textContent = `${inbound?'▲ in':'▼ uit'}: ${firstName(p?.name||'')} (${liveMin()}')`; b.classList.remove('hidden'); } }
