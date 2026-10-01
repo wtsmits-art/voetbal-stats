@@ -74,24 +74,8 @@
 <script>
 /* ==================================================================
    TeamStats – amateur football statistics
-   ------------------------------------------------------------------
-   Alle data-toegang loopt via het Database-object hieronder.
-   Nu: LocalStorage. Straks: Firebase (zie de instructies in je project).
-   Je hoeft NERGENS anders in de code iets te veranderen om over te
-   stappen — alleen de methodes van Database vervangen.
    ================================================================== */
 
-/* ==================================================================
-   >>> STAP 1: PLAK HIER JE FIREBASE-CONFIG <<<
-   ------------------------------------------------------------------
-   Vervang alle "PLAK_HIER"-waarden hieronder door je eigen gegevens
-   uit de Firebase-console (Projectinstellingen -> Je apps -> Web-app
-   -> SDK setup and configuration -> "Config"). Meer hoef je NIET te
-   doen: de rest van de code staat al klaar.
-
-   Zolang hier nog "PLAK_HIER" staat, werkt de app gewoon LOKAAL
-   (zoals de originele versie) en zie je bovenin een rode balk.
-   ================================================================== */
 const FIREBASE_CONFIG = {
   apiKey:            "AIzaSyCad3yioWqlE2C1iLrPcaksV4WZr8c0u74",
   authDomain:        "teamstats-voetbal.firebaseapp.com",
@@ -100,17 +84,13 @@ const FIREBASE_CONFIG = {
   messagingSenderId: "702420588463",
   appId:             "1:702420588463:web:841c4e97d6dbd12a47815a"
 };
-const CLUB_DOC = "teamstats-club";       // 1 gedeeld document voor de hele club
-// Firebase is "klaar" zodra je de config hebt ingevuld (geen PLAK_HIER meer).
+const CLUB_DOC = "teamstats-club";
 const FIREBASE_READY = !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.includes("PLAK_HIER"));
 
-/* ==================================================================
-   DATABASE HELPER  –  het ENIGE stuk dat je hoeft te vervangen
-   ================================================================== */
 const STORAGE_KEY = "teamstats_data_v1";
 const emptyData = () => ({ teams: [], seasons: [], players: [], matches: [] });
 
-let db = null;   // wordt de Firestore-verbinding zodra de config klopt
+let db = null;
 
 const Database = {
   async load() {
@@ -136,49 +116,34 @@ const Database = {
   }
 };
 
-let auth = null;   // Firebase Authentication
+let auth = null;
 
-// Firebase opstarten zodra de config is ingevuld.
 if (FIREBASE_READY && typeof firebase !== 'undefined') {
   try { firebase.initializeApp(FIREBASE_CONFIG); db = firebase.firestore(); auth = firebase.auth(); }
   catch (e) { console.error('Firebase-init mislukt:', e); db = null; auth = null; }
 }
 
-/* ==================================================================
-   AUTH & ROLLEN
-   ------------------------------------------------------------------
-   - Ingelogde gebruiker krijgt automatisch een doc users/{uid} met
-     rol 'viewer'. De ALLEREERSTE admin zet je zelf op 'admin' via de
-     Firebase Console (collectie users -> jouw document -> role: admin).
-   - 'admin' mag alles bewerken; 'viewer' mag alleen bekijken.
-   - Lokaal (geen Firebase-config) mag alles, zoals de losse versie.
-   ================================================================== */
-let CURRENT_USER = null;         // firebase auth user
-let USER_ROLE = null;            // 'admin' | 'viewer'
-let USER_NAME = null;            // gekozen gebruikersnaam
-let USER_REALNAME = null;        // echte naam (privé: alleen jij + admin)
-let MEMBERS = [];                // cache van de ledenlijst (voor admin)
+let CURRENT_USER = null;
+let USER_ROLE = null;
+let USER_NAME = null;
+let USER_REALNAME = null;
+let MEMBERS = [];
 let MEMBERS_LOADED = false;
 
 const isAdmin = () => USER_ROLE === 'admin';
-const canEdit = () => !FIREBASE_READY || isAdmin();   // wie mag data wijzigen
+const canEdit = () => !FIREBASE_READY || isAdmin();
 
-// >>> TEAMWACHTWOORD: pas dit aan naar jullie eigen woord (min. 6 tekens) <<<
 const TEAM_PASSWORD = "svloil2";
-// Domein voor de "fake e-mail" truc: gebruikersnaam -> naam@onsteam.local
 const TEAM_EMAIL_DOMAIN = "onsteam.local";
-// Maak van een gebruikersnaam een geldig, uniek e-mailadres (kleine letters, geen spaties).
+
 function usernameToEmail(username){
   const clean = String(username||'').toLowerCase().trim()
-    .replace(/\s+/g,'')                 // spaties weg
-    .replace(/[^a-z0-9._-]/g,'');       // alleen veilige tekens
+    .replace(/\s+/g,'')
+    .replace(/[^a-z0-9._-]/g,'');
   return { clean, email: clean ? `${clean}@${TEAM_EMAIL_DOMAIN}` : '' };
 }
-// Haal de gebruikersnaam terug uit een fake-email (voor weergave).
 function emailToUsername(email){ return String(email||'').split('@')[0] || ''; }
 
-// Zorg dat er een users/{uid}-document bestaat; geef {role, username} terug.
-// Bij een NIEUW account slaan we de gekozen gebruikersnaam + rol 'viewer' op.
 async function ensureUserDoc(user, username){
   const ref = db.collection('users').doc(user.uid);
   const snap = await ref.get();
@@ -191,9 +156,6 @@ async function ensureUserDoc(user, username){
   return { role: d.role || 'viewer', username: d.username || emailToUsername(user.email), realName: d.realName || '' };
 }
 
-/* ==================================================================
-   STATE
-   ================================================================== */
 let DATA = emptyData();
 
 const PREFS_KEY = "teamstats_prefs_v1";
@@ -204,9 +166,6 @@ let PREFS = (() => {
 function savePrefs(){ localStorage.setItem(PREFS_KEY, JSON.stringify(PREFS)); }
 function applyTheme(){ document.documentElement.classList.toggle('light', PREFS.theme === 'light'); }
 
-/* Live-wedstrijd timer. We tellen in SECONDEN op de wedstrijdklok.
-   half 1: 0..2700 = 00:00..45:00, daarna blessuretijd.
-   half 2: 2700..5400 = 45:00..90:00, daarna blessuretijd. */
 let LIVE = { matchId: null, seconds: 0, half: 1, running: false, timer: null };
 
 const HALF1_CAP = 45*60, HALF2_CAP = 90*60;
@@ -215,7 +174,6 @@ function timerParts(){
   const cap = timerCap();
   return { reg: Math.min(LIVE.seconds, cap), stop: Math.max(0, LIVE.seconds - cap) };
 }
-// Gelogde minuut (incl. blessuretijd: 45:00 [+02:15] -> minuut 47)
 const liveMin = () => {
   const cap = timerCap();
   if (LIVE.seconds <= cap) return Math.floor(LIVE.seconds/60);
@@ -236,23 +194,16 @@ async function commit() {
   render();
 }
 
-/* ==================================================================
-   HELPERS
-   ================================================================== */
 function currentTeam(){ return DATA.teams.find(t => t.id === PREFS.teamId) || DATA.teams[0] || null; }
 function currentSeason(){ return DATA.seasons.find(s => s.id === PREFS.seasonId) || DATA.seasons[0] || null; }
-// Groep van een speler: 'speler' | 'staf' | 'gast' (met migratie vanaf oude isStaff).
 function playerGroup(p){ return p.group || (p.isStaff ? 'staf' : 'speler'); }
 function teamByGroup(teamId, g){ return DATA.players.filter(p => p.teamId === teamId && playerGroup(p) === g); }
 function teamSelection(teamId){ return teamByGroup(teamId, 'speler'); }
 function teamGuests(teamId){ return teamByGroup(teamId, 'gast'); }
 function teamStaff(teamId){ return teamByGroup(teamId, 'staf'); }
-// Speelbaar = selectie + gastspelers (die tellen mee in wedstrijden en statistieken).
 function teamPlayers(teamId){ return DATA.players.filter(p => p.teamId === teamId && playerGroup(p) !== 'staf'); }
 function playerById(id){ return DATA.players.find(p => p.id === id); }
-// Weergavenaam in verslag/verloop: bijnaam als die er is, anders voorletter + achternaam.
 function displayName(id){ const p = playerById(id); if(!p) return '?'; return (p.nickname && p.nickname.trim()) ? p.nickname.trim() : shortName(p.name); }
-// Stand afleiden uit de doelpunt-events (zodat wissen/wijzigen de stand meeneemt).
 function recomputeScore(m){
   const ourHome = m.homeAway !== 'Uit';
   let own=0, opp=0;
@@ -265,7 +216,6 @@ function seasonMatches(teamId, seasonId){
     .filter(m => m.teamId === teamId && m.seasonId === seasonId)
     .sort((a,b) => (a.date+a.time).localeCompare(b.date+b.time));
 }
-// "gele" / "rode" (correcte spelling)
 const cardAdj = (ct) => ct==='Rood' ? 'rode' : 'gele';
 
 function playerMinutes(match, playerId){
@@ -299,7 +249,6 @@ function computeStats(teamId, seasonId){
       if ((m.lineup||[]).includes(p.id)) starts++;
       if ((m.events||[]).some(e => e.type==='sub' && e.team!=='opp' && e.playerInId===p.id)) subIn++;
       minutes += playerMinutes(m, p.id);
-      // Clean sheet: keeper die speelde en 0 tegen kreeg.
       if (isKeeper && played1){
         const against = (m.events||[]).filter(e => e.type==='goal' && e.team==='opp').length;
         if (against === 0) cs++;
@@ -320,7 +269,6 @@ function nextMatch(teamId, seasonId){
   return seasonMatches(teamId, seasonId).filter(m => m.status !== 'Gespeeld' && m.date >= today)[0]
     || seasonMatches(teamId, seasonId).filter(m => m.status !== 'Gespeeld')[0] || null;
 }
-// Een wedstrijd van vandaag die nog niet is afgerond = kandidaat voor "live" op het Overzicht.
 function liveFeaturedMatch(teamId, seasonId){
   const today = new Date().toISOString().slice(0,10);
   return seasonMatches(teamId, seasonId).filter(m => m.status !== 'Gespeeld' && m.date === today)[0] || null;
@@ -332,9 +280,6 @@ function matchTitle(m){
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-/* ==================================================================
-   ICS PARSER
-   ================================================================== */
 function parseICS(text){
   const lines = text.replace(/\r\n/g,'\n').replace(/\n[ \t]/g,'').split('\n');
   const events = []; let cur = null;
@@ -361,23 +306,16 @@ function parseICS(text){
   }).filter(e => e.date);
 }
 function normTeam(s){
-  /* Vergelijk teamnamen robuust: "S.V. loil 2" ≈ "sv Loil 2" ≈ "SV Loil-2" */
   return String(s||'').toLowerCase()
-    .replace(/\(.*?\)/g, ' ')   // strip (10:00u) e.d.
-    .replace(/[^a-z0-9]+/g, '')   // alleen letters/cijfers
+    .replace(/\(.*?\)/g, ' ')
+    .replace(/[^a-z0-9]+/g, '')
     .trim();
 }
 function cleanSide(s){
-  /* Haal tijd/suffix uit een kant van de titel, behoud leesbare naam */
   return String(s||'').replace(/\s*\(.*?\)\s*$/g, '').trim();
 }
 function guessOpponent(summary){
-  /* ICS-titels zijn altijd "X - A". Alleen importwaarden gebruiken.
-     Komt X overeen met actief team → Thuis (tegenstander = A).
-     Komt A overeen met actief team → Uit  (tegenstander = X).
-     Eigen teamnaam nooit zelf toevoegen of als tegenstander opslaan. */
   const usNorm = normTeam(currentTeam()?.name || '');
-  // Split op streepjes / vs (met of zonder spaties)
   const parts = summary.split(/\s*[-–—]+\s*|\s+vs\.?\s+/i).map(s => s.trim()).filter(Boolean);
   if (parts.length >= 2){
     const left = cleanSide(parts[0]);
@@ -390,24 +328,16 @@ function guessOpponent(summary){
     };
     if (match(left) && !match(right)) return { opponent: right, homeAway: 'Thuis' };
     if (match(right) && !match(left)) return { opponent: left, homeAway: 'Uit' };
-    // Beide of geen match: niet raden met eigen team — gebruik rechts als tegenstander
     if (match(left) && match(right)) {
-      // Bijv. "sv Loil 2 - S.V. loil 2": kies de kant die het minst exact is als opponent
       return { opponent: right, homeAway: 'Thuis' };
     }
     return { opponent: right, homeAway: 'Thuis' };
   }
-  // Geen "X - A": hele summary als tegenstander (zonder eigen team ervoor te plakken)
   return { opponent: cleanSide(summary), homeAway: 'Thuis' };
 }
 
-/* ==================================================================
-   GEDEELDE WEERGAVE: één regel in het wedstrijdverloop
-   Eigen team = links, tegenstander = rechts uitgelijnd.
-   ================================================================== */
 function eventRow(e, allowDelete, homeSide){
   const opp = e.team === 'opp';
-  // Uitlijning volgt THUIS (links) / UIT (rechts), niet eigen/tegenstander.
   const rightAlign = (homeSide === undefined) ? opp : !homeSide;
   let icon='•', main='';
   const nm = (id) => displayName(id);
@@ -439,15 +369,11 @@ function eventRow(e, allowDelete, homeSide){
     ${min}<div class="tl-dot ${dot}"></div><div class="flex-1 text-sm">${icon} ${main}</div>${del}</div>`;
 }
 
-/* ==================================================================
-   RENDER
-   ================================================================== */
 const app = document.getElementById('app');
 const view = () => PREFS.view || 'dashboard';
 function goto(v){ PREFS.view = v; savePrefs(); render(); }
 
 function render(){
-  // Niet ingelogd (met Firebase) -> toon inlogscherm en verder niets.
   if (FIREBASE_READY && auth && !CURRENT_USER){
     document.getElementById('bottomnav').innerHTML = '';
     const el = document.getElementById('topLogo'); if (el) el.innerHTML='';
@@ -463,7 +389,6 @@ function render(){
   else if (v === 'agenda') app.innerHTML = agendaView(t, s);
   else if (v === 'live'){
     const lm = DATA.matches.find(x => x.id === LIVE.matchId);
-    // Viewers krijgen de read-only samenvatting/live-weergave; admins de invoer.
     if (lm && !canEdit()) app.innerHTML = matchSummaryView(lm);
     else app.innerHTML = liveView(t, s);
   }
@@ -472,7 +397,6 @@ function render(){
   else app.innerHTML = dashboardView(t, s);
   bind();
   applyRoleGate();
-  // Scherm-ticker: op de live-pagina, en op Overzicht als er een wedstrijd van vandaag is.
   if (v==='live' && LIVE.matchId){ refreshTimerDisplay(); startDisplayTick(); }
   else if (v==='dashboard'){
     const lm = (t && s) ? liveFeaturedMatch(t.id, s.id) : null;
@@ -480,11 +404,9 @@ function render(){
     else stopDisplayTick();
   }
   else { stopDisplayTick(); }
-  // Ledenlijst automatisch laden voor admin op de instellingenpagina.
   if (v==='settings' && isAdmin() && !MEMBERS_LOADED){ MEMBERS_LOADED = true; loadMembers(); }
 }
 
-/* Verberg alle wijzig-knoppen voor viewers (read-only). */
 const WRITE_ACTS = new Set([
   'addPlayer','addStaff','bulkAdd','editPlayer','delPlayer',
   'addMatch','importICS','editPlayed','delMatch',
@@ -492,15 +414,13 @@ const WRITE_ACTS = new Set([
   'logGoal','logCard','logSub','delEvent','editEvent','lineup','finishMatch','undo','generateReport','addGuest',
   'addTeam','renameTeam','addSeason','removeLogo','importData'
 ]);
-// 'startLive' bewust NIET in de lijst: viewers mogen een wedstrijd openen om de
-// live stand + timer te bekijken (read-only). De wijzig-knoppen blijven verborgen.
+
 function applyRoleGate(){
   if (canEdit()) return;
   app.querySelectorAll('[data-act]').forEach(b => { if (WRITE_ACTS.has(b.dataset.act)) b.style.display = 'none'; });
   app.querySelectorAll('#logoInput').forEach(el => { const lab = el.closest('label'); if (lab) lab.style.display='none'; });
 }
 
-/* ---------- Inlogscherm (gebruikersnaam + teamwachtwoord) ---------- */
 const isInvite = () => /[?&]invite=true\b/.test(location.search);
 const inviteLink = () => location.origin + location.pathname + '?invite=true';
 
@@ -531,17 +451,16 @@ function bindLogin(){
   document.querySelectorAll('[data-login]').forEach(b => b.onclick = async () => {
     loginErr('');
     const { clean, email } = usernameToEmail(document.getElementById('li_user').value);
-    const pass = document.getElementById('li_pass').value.trim();   // spaties eraf (mobiel/autofill)
+    const pass = document.getElementById('li_pass').value.trim();
     if (!clean){ loginErr('Vul een geldige gebruikersnaam in (letters/cijfers).'); return; }
-    // Bij aanmelden (invite): eerst het gedeelde teamwachtwoord controleren.
     if (b.dataset.login === 'register' && pass !== TEAM_PASSWORD){ loginErr('Onjuist team wachtwoord'); return; }
     if ((pass||'').length < 6){ loginErr('Het teamwachtwoord is minimaal 6 tekens.'); return; }
-    PENDING_USERNAME = clean;   // onthouden voor het users-document
+    PENDING_USERNAME = clean;
     try {
       if (b.dataset.login === 'register'){
-        await auth.createUserWithEmailAndPassword(email, pass);   // nieuw account (wachtwoord = teamwachtwoord)
+        await auth.createUserWithEmailAndPassword(email, pass);
       } else {
-        await auth.signInWithEmailAndPassword(email, pass);       // bestaand account
+        await auth.signInWithEmailAndPassword(email, pass);
       }
     } catch (e) {
       PENDING_USERNAME = null;
@@ -549,7 +468,7 @@ function bindLogin(){
     }
   });
 }
-let PENDING_USERNAME = null;   // gekozen gebruikersnaam tijdens aanmelden
+let PENDING_USERNAME = null;
 function vertaalAuthError(e, mode){
   const c = (e && e.code) || '';
   if (c.includes('weak-password')) return 'Het teamwachtwoord is te kort (min. 6 tekens).';
@@ -561,7 +480,6 @@ function vertaalAuthError(e, mode){
   return (e && e.message) || 'Inloggen mislukt.';
 }
 
-/* ---------- Ledenlijst (admin) ---------- */
 async function loadMembers(){
   if (!db || !isAdmin()) return;
   try {
@@ -575,7 +493,6 @@ function header(title, sub){
     <h1 class="text-2xl font-bold">${esc(title)}</h1>
     ${sub ? `<p class="text-neutral-400 text-sm mt-1">${esc(sub)}</p>` : ''}</div>`;
 }
-// Klein logo rechtsboven (niet op Overzicht — daar staat het naast de naam)
 function renderTopLogo(){
   const el = document.getElementById('topLogo'); if (!el) return;
   const t = currentTeam();
@@ -591,7 +508,6 @@ function updateFavicon(){
   const t = currentTeam();
   link.href = (t && t.logo) ? t.logo : DEFAULT_FAVICON;
 }
-// Verklein een geüploade afbeelding naar max 256px en geef een data-URL terug.
 function resizeImage(file, max, cb){
   const r = new FileReader();
   r.onload = () => {
@@ -615,7 +531,6 @@ function handleLogoFile(e){
   resizeImage(f, 256, (dataUrl) => { if (!dataUrl){ alert('Kon deze afbeelding niet laden.'); return; } t.logo = dataUrl; commit(); });
 }
 
-/* ---------- Welkomstscherm ---------- */
 function welcomeScreen(){
   return header('TeamStats', 'Voetbalstatistieken voor je team') + `
   <div class="px-4"><div class="card p-6 text-center">
@@ -626,7 +541,6 @@ function welcomeScreen(){
   </div></div>`;
 }
 
-/* ---------- 1. DASHBOARD (Overzicht) – seizoenstotalen ---------- */
 function dashboardView(t, s){
   const stats = s ? computeStats(t.id, s.id) : [];
   const topscorer = [...stats].sort((a,b)=>b.goals-a.goals)[0];
@@ -696,7 +610,6 @@ function dashboardView(t, s){
   </div>`;
 }
 
-/* ---------- 2. SPELERS / STAF / GAST (tabbladen) ---------- */
 function playersView(t){
   const byName = (a,b) => (a.name||'').localeCompare(b.name||'','nl',{sensitivity:'base'});
   const tab = PREFS.playerTab || 'speler';
@@ -737,7 +650,6 @@ function playersView(t){
   </div>`;
 }
 
-/* ---------- 3. WEDSTRIJDEN ---------- */
 function agendaView(t, s){
   if (!s) return header('Wedstrijden') + '<div class="px-4 text-neutral-400">Maak eerst een seizoen aan bij Instellingen.</div>';
   const matches = seasonMatches(t.id, s.id);
@@ -777,7 +689,6 @@ function agendaView(t, s){
   </div>`;
 }
 
-/* ---------- 4. LIVE MATCH TRACKER ---------- */
 function liveView(t, s){
   const m = DATA.matches.find(x => x.id === LIVE.matchId);
   if (!m){
@@ -875,10 +786,15 @@ function liveView(t, s){
         <h3 class="font-bold">Verslag</h3>
         <button data-act="generateReport" class="btn text-green-400 text-sm font-semibold">✨ Genereer</button>
       </div>
-      <div class="card p-3 text-sm ${m.report?'':'text-neutral-500'}">${m.report?esc(m.report):'Nog geen verslag. Rond de wedstrijd af of tik op Genereer (gebruikt notities + scoreverloop).'}</div>
+      <div id="reportArea" class="card p-3 text-sm ${m.report?'':'text-neutral-500'}">
+        ${m.report?esc(m.report):'Nog geen verslag. Rond de wedstrijd af of tik op Genereer (gebruikt notities + scoreverloop).'}
+      </div>
+      <button data-act="shotReport" class="btn w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl font-semibold mt-2 text-sm">
+        🖼 Screenshot van verslag opslaan
+      </button>
     </div>
 
-    <!-- Wedstrijdverloop (met score voor de screenshot) -->
+    <!-- Wedstrijdverloop -->
     <div>
       <h3 class="font-bold mb-1">Wedstrijdverloop</h3>
       <div id="timelineArea" class="card p-3">
@@ -891,12 +807,13 @@ function liveView(t, s){
         </div>
         ${events.length ? events.map(e => eventRow(e, true, (e.team==='opp')? (m.homeAway==='Uit') : (m.homeAway!=='Uit'))).join('') : '<div class="text-neutral-500 text-sm text-center py-4">Nog geen acties. Log een goal, kaart of wissel.</div>'}
       </div>
-      <button data-act="shotTimeline" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold mt-2">🖼 Screenshot van het verloop</button>
+      <button data-act="shotTimelineWithReport" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold mt-2">
+        🖼 Screenshot van verloop + verslag
+      </button>
     </div>
   </div>`;
 }
 
-/* ---------- Read-only SAMENVATTING / LIVE (voor viewers) ---------- */
 function matchSummaryView(m){
   const t = currentTeam();
   const ourHome = m.homeAway !== 'Uit';
@@ -905,7 +822,6 @@ function matchSummaryView(m){
   const leftLogo = ourHome ? (t.logo||'') : '';
   const rightLogo = ourHome ? '' : (t.logo||'');
 
-  // Events chronologisch + doorlopende stand voor de score-badges.
   const evs = (m.events||[]).slice().sort((a,b)=> (a.minute-b.minute));
   let hs=0, as=0;
   const rowsData = evs.map(e=>{
@@ -992,7 +908,6 @@ function matchSummaryView(m){
     </div>`;
 }
 
-/* ---------- 5. STATISTIEKEN ---------- */
 function statsView(t, s){
   if (!s) return header('Statistieken') + '<div class="px-4 text-neutral-400">Maak eerst een seizoen aan bij Instellingen.</div>';
   const sortKey = PREFS.sortKey || 'goals';
@@ -1030,7 +945,6 @@ function statsView(t, s){
   </div>`;
 }
 
-/* ---------- 6. INSTELLINGEN ---------- */
 function settingsView(t, s){
   const teamOpts = DATA.teams.map(x => `<option value="${x.id}" ${x.id===t?.id?'selected':''}>${esc(x.name)}</option>`).join('');
   const seasonOpts = DATA.seasons.map(x => `<option value="${x.id}" ${x.id===s?.id?'selected':''}>${esc(x.name)}</option>`).join('');
@@ -1096,7 +1010,6 @@ function settingsView(t, s){
   </div>`;
 }
 
-/* ---------- Account-kaart (ingelogd) ---------- */
 function accountCard(){
   if (!FIREBASE_READY || !CURRENT_USER) return '';
   const roleBadge = isAdmin()
@@ -1111,7 +1024,6 @@ function accountCard(){
   </div>`;
 }
 
-/* ---------- Ledenbeheer (alleen admin) ---------- */
 function membersCard(){
   if (!isAdmin()) return '';
   const rows = MEMBERS.map(u => {
@@ -1146,7 +1058,6 @@ function membersCard(){
   </div>`;
 }
 
-/* ---------- Bottom nav ---------- */
 function renderNav(){
   const items = [
     ['dashboard','Overzicht','▦'],
@@ -1155,16 +1066,13 @@ function renderNav(){
     ['live','Live','✎'],
     ['stats','Stats','📊'],
     ['settings','Instel.','⚙'],
-  ];   // Live-tab voor iedereen: viewers kijken read-only mee (incl. live timer)
+  ];
   document.getElementById('bottomnav').style.gridTemplateColumns = `repeat(${items.length},minmax(0,1fr))`;
   document.getElementById('bottomnav').innerHTML = items.map(([v,l,ic]) =>
     `<button data-nav="${v}" class="btn py-2.5 flex flex-col items-center gap-0.5 ${view()===v?'text-green-400':'text-neutral-500'}">
        <span class="text-lg leading-none">${ic}</span><span class="text-[10px]">${l}</span></button>`).join('');
 }
 
-/* ==================================================================
-   MODALS
-   ================================================================== */
 const modalRoot = document.getElementById('modalRoot');
 function closeModal(){ modalRoot.innerHTML=''; }
 function openModal(title, inner, footer){
@@ -1190,30 +1098,20 @@ function sideToggle(active){
     <button type="button" data-side="opp" class="btn sideBtn ${cls('opp')} py-2.5 rounded-lg font-semibold text-sm">Tegenstander</button>
   </div>`;
 }
-function playerOptions(teamId, selId, includeEmpty){
-  let o = includeEmpty ? `<option value="">— geen —</option>` : '';
-  o += teamPlayers(teamId).sort((a,b)=>(a.number||99)-(b.number||99))
-       .map(p => `<option value="${p.id}" ${p.id===selId?'selected':''}>${p.number!=null?'#'+p.number+' ':''}${esc(p.name)}</option>`).join('');
-  return o;
-}
 
-/* ------- Opstelling: veld / bank ------- */
 const firstName = (n) => String(n||'').trim().split(/\s+/)[0] || n;
-// "Wouter Smits" -> "W. Smits" (voornaam afgekort). Eén woord blijft heel.
 function shortName(full){
   const parts = String(full||'').trim().split(/\s+/);
   if (parts.length < 2) return full || '';
   return parts[0].charAt(0).toUpperCase() + '. ' + parts.slice(1).join(' ');
 }
 function timerStartedNow(){ return computeElapsedSeconds() > 0 || TIMER.running; }
-// Zorg dat onField/onBench bestaan en alle spelers bevatten.
 function ensureSquad(m){
   const all = teamPlayers(m.teamId).map(p=>p.id);
   if (!Array.isArray(m.onField)) m.onField = (m.lineup||[]).filter(id=>all.includes(id));
   if (!Array.isArray(m.onBench)) m.onBench = [];
   if (!Array.isArray(m.onAbsent)) m.onAbsent = [];
   const known = new Set([...m.onField, ...m.onBench, ...m.onAbsent]);
-  // Nieuwe/niet-ingedeelde spelers: gasten -> automatisch "niet aanwezig", rest -> bank.
   all.filter(id=>!known.has(id)).forEach(id => {
     if (playerGroup(playerById(id)) === 'gast') m.onAbsent.push(id);
     else m.onBench.push(id);
@@ -1226,7 +1124,6 @@ function fieldPlayerIds(m){
   const ids = (m && m.onField && m.onField.length) ? m.onField : (m && m.lineup || []);
   return ids.length ? ids : teamPlayers(currentTeam().id).map(p=>p.id);
 }
-// Slim gesorteerde <option>-lijst: alleen veldspelers, Top 3 + streep + rest A–Z.
 function smartOptions(m, metric, includeEmpty){
   const statMap = {}; computeStats(currentTeam().id, currentSeason().id).forEach(r=>statMap[r.id]=r);
   const val = (p) => { const r=statMap[p.id]; if(!r) return 0; return metric==='cards' ? (r.yellow||0)+(r.red||0) : (r[metric]||0); };
@@ -1241,12 +1138,10 @@ function smartOptions(m, metric, includeEmpty){
   if (rest.length) html += `<optgroup label="────── overige (A–Z) ──────">${rest.map(opt).join('')}</optgroup>`;
   return html;
 }
-// Alfabetische lijst uit een set ids (voor handmatige wissel).
 function alphaOptions(ids){
   return ids.map(id=>playerById(id)).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name))
     .map(p=>`<option value="${p.id}">${p.number!=null?'#'+p.number+' ':''}${esc(p.name)}</option>`).join('');
 }
-/* Vrije posities op het veld (x/y in %) + drag tussen veld en bank. */
 function defaultFieldPos(i, total){
   const perRow = 4, row = Math.floor(i/perRow), col = i%perRow, rows = Math.max(1, Math.ceil(total/perRow));
   const x = 12 + col * (76/Math.max(1, perRow-1));
@@ -1343,7 +1238,7 @@ function dropLineup(pid, x, y){
     }
     commitLineup(m);
   } else {
-    renderLineupBody();   // buiten alle zones: terugklappen
+    renderLineupBody();
   }
 }
 function subBadge(pid, inbound){ const b=document.getElementById('subBadge'); if(b){ const p=playerById(pid); b.textContent = `${inbound?'▲ in':'▼ uit'}: ${firstName(p?.name||'')} (${liveMin()}')`; b.classList.remove('hidden'); } }
@@ -1353,7 +1248,6 @@ async function commitLineup(m){
   render();
 }
 
-/* Speler/staf/gast toevoegen of bewerken (met groep-keuze = verplaatsen). */
 function openPlayerForm(p, group){
   group = group || (p ? playerGroup(p) : 'speler');
   const isEdit = !!p;
@@ -1375,7 +1269,6 @@ function openPlayerForm(p, group){
   if (sel) sel.onchange = () => { document.getElementById('grpFields').innerHTML = (sel.value==='staf') ? staffRole : numPos; };
 }
 
-/* Goal-venster (herbruikt door de Goal-knop én de score-+). */
 function openGoalModal(active){
   const m = DATA.matches.find(x => x.id === LIVE.matchId);
   openModal(`Goal – ${liveMin()}'`,
@@ -1391,15 +1284,11 @@ function openGoalModal(active){
     `<button data-act="saveGoal" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-3">Goal opslaan</button>`);
 }
 
-// Welke kant (own/opp) hoort bij een score-kolom (home/away)?
 function columnSide(m, colSide){
   const ourHome = m.homeAway !== 'Uit';
   return ((colSide==='home') === ourHome) ? 'own' : 'opp';
 }
 
-/* ==================================================================
-   BINDING
-   ================================================================== */
 function bind(){
   document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { goto(b.dataset.nav); });
   document.querySelectorAll('#teamSel').forEach(el => el.onchange = () => { PREFS.teamId = el.value; savePrefs(); render(); });
@@ -1446,7 +1335,6 @@ async function handleAct(act, ds){
       savePrefs(); return render();
     }
 
-    /* ----- Auth & rollen ----- */
     case 'logout': { if (auth) await auth.signOut(); return; }
     case 'copyInvite': {
       const link = inviteLink();
@@ -1474,17 +1362,15 @@ async function handleAct(act, ds){
     }
     case 'toggleRole': {
       if (!isAdmin() || !db) return;
-      const newRole = ds.role;   // 'admin' of 'viewer'
+      const newRole = ds.role;
       if (CURRENT_USER && ds.uid===CURRENT_USER.uid && newRole==='viewer'
           && !confirm('Je haalt je EIGEN adminrechten weg. Zeker weten?')) return;
       try { await db.collection('users').doc(ds.uid).set({ role: newRole }, { merge:true }); }
       catch (e){ alert('Rol wijzigen mislukt (geen rechten?).'); return; }
-      // Als ik mezelf wijzig, verandert mijn eigen rol direct mee:
       if (CURRENT_USER && ds.uid===CURRENT_USER.uid) USER_ROLE = newRole;
       return loadMembers();
     }
 
-    /* ----- Teams & seizoenen ----- */
     case 'addTeam':
       return openModal('Nieuw team', field('Teamnaam', inp('f_name','Bijv. Heren 1, O19')),
         `<button data-act="saveTeam" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
@@ -1510,7 +1396,6 @@ async function handleAct(act, ds){
       const se = { id: uid(), name }; DATA.seasons.push(se); PREFS.seasonId = se.id; savePrefs(); closeModal(); return commit();
     }
 
-    /* ----- Spelers / staf / gast ----- */
     case 'addPlayer':  return openPlayerForm(null, 'speler');
     case 'addStaff':   return openPlayerForm(null, 'staf');
     case 'addGuest':   return openPlayerForm(null, 'gast');
@@ -1561,7 +1446,6 @@ async function handleAct(act, ds){
       DATA.players = DATA.players.filter(x => x.id !== ds.id); return commit();
     }
 
-    /* ----- Wedstrijden ----- */
     case 'addMatch': {
       if (!s) { alert('Maak eerst een seizoen aan bij Instellingen.'); return; }
       return openModal('Nieuwe wedstrijd',
@@ -1605,10 +1489,8 @@ async function handleAct(act, ds){
       closeModal(); alert(`${added} wedstrijd(en) geïmporteerd.`); return commit();
     }
 
-    /* ----- Live tracker ----- */
     case 'startLive': {
       const m = DATA.matches.find(x => x.id === ds.id); if (!m) return;
-      // Andere wedstrijd geopend? Abonneer op de timer van die wedstrijd.
       if (LIVE.matchId !== m.id){
         LIVE.matchId = m.id;
         if (db){ subscribeTimer(m.id); }
@@ -1618,19 +1500,16 @@ async function handleAct(act, ds){
       return goto('live');
     }
     case 'closeLive': {
-      // Alleen de pagina verlaten; timer blijft lopen tot pauze of afronden
       return goto('agenda');
     }
 
-    /* Score + : open Goal-venster voor het juiste team */
     case 'goalPlus': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
       return openGoalModal(columnSide(m, ds.side));
     }
-    /* Score − : verwijder chronologisch laatste doelpunt van dat team */
     case 'goalMinus': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
-      const side = columnSide(m, ds.side);              // 'own' | 'opp'
+      const side = columnSide(m, ds.side);
       pushUndo(m);
       for (let i = m.events.length-1; i>=0; i--){
         if (m.events[i].type==='goal' && (m.events[i].team||'own')===side){ m.events.splice(i,1); break; }
@@ -1645,7 +1524,6 @@ async function handleAct(act, ds){
     case 'firstHalf':   return timerSetHalf(1);
     case 'secondHalf':  return timerSetHalf(2);
 
-    /* --- GOAL --- */
     case 'logGoal': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
       return openGoalModal('own');
@@ -1667,7 +1545,6 @@ async function handleAct(act, ds){
       closeModal(); return commit();
     }
 
-    /* --- KAART --- */
     case 'logCard': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
       return openModal(`Kaart – ${liveMin()}'`,
@@ -1689,7 +1566,6 @@ async function handleAct(act, ds){
       closeModal(); return commit();
     }
 
-    /* --- WISSEL --- */
     case 'logSub': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
       return openModal(`Wissel – ${liveMin()}'`,
@@ -1711,7 +1587,6 @@ async function handleAct(act, ds){
         if (!out || !inId){ alert('Kies zowel een speler UIT als IN.'); return; }
         if (out===inId){ alert('Kies twee verschillende spelers.'); return; }
         m.events.push({ id: uid(), type:'sub', minute: liveMin(), team:'own', playerOutId: out, playerInId: inId });
-        // Velden/bank bijwerken zodat gewisselde spelers opnieuw wisselbaar zijn.
         ensureSquad(m);
         m.onField = (m.onField||[]).filter(id=>id!==out); if(!m.onField.includes(inId)) m.onField.push(inId);
         m.onBench = (m.onBench||[]).filter(id=>id!==inId); if(!m.onBench.includes(out)) m.onBench.push(out);
@@ -1756,7 +1631,7 @@ async function handleAct(act, ds){
         m.status = 'Gespeeld'; m.playedSeconds = secs; if (secs > 0) m.length = Math.round(secs/60);
         if (db){ try { await timerRef().set({ accumulatedMs: secs*1000, startTime: null, running:false }, { merge:true }); } catch(e){} }
         else { TIMER.running=false; TIMER.startTimeMs=null; stopDisplayTick(); }
-        if (!m.report) m.report = buildAutoReport(m);   // automatisch een verslag bij afronden
+        if (!m.report) m.report = buildAutoReport(m);
       } else { m.status = 'Gepland'; }
       return commit();
     }
@@ -1782,11 +1657,13 @@ async function handleAct(act, ds){
       recomputeScore(m);
       closeModal(); return commit();
     }
-    case 'shotTimeline': return shotTimeline();
 
-    /* ----- Export / backup ----- */
+    /* SCREENSHOT / PRINT HANDLERS */
+    case 'shotReport': return shotReport();
+    case 'shotTimelineWithReport': return shotTimelineWithReport();
     case 'exportCSV': return exportCSV(t, s);
-    case 'printTable': return printOrShot(document.getElementById('printArea'), `statistieken_${t.name}_${s.name}`);
+    case 'printTable': return printTableFull(t, s);
+
     case 'exportData': {
       const stamp = new Date().toISOString().slice(0,10);
       downloadBlob(new Blob([JSON.stringify(DATA,null,2)], {type:'application/json'}), `teamstats-backup_${stamp}.json`);
@@ -1811,9 +1688,6 @@ async function handleAct(act, ds){
   }
 }
 
-/* ==================================================================
-   UNDO – bewaar een snapshot van de wedstrijd vóór elke live-wijziging
-   ================================================================== */
 let UNDO_STACK = [];
 function pushUndo(m){ try { UNDO_STACK.push({ id:m.id, snap: JSON.stringify(m) }); if (UNDO_STACK.length>30) UNDO_STACK.shift(); } catch(e){} }
 function undoLast(){
@@ -1825,7 +1699,6 @@ function undoLast(){
   commit();
 }
 
-/* ---------- Actie bewerken ---------- */
 function playablePlayerOptions(m, selId){
   return teamPlayers(m.teamId).sort((a,b)=>(a.number||99)-(b.number||99))
     .map(p=>`<option value="${p.id}" ${p.id===selId?'selected':''}>${p.number!=null?'#'+p.number+' ':''}${esc(p.name)}</option>`).join('');
@@ -1855,7 +1728,6 @@ function openEditEvent(eid){
     `<button data-act="saveEditEvent" data-id="${eid}" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
 }
 
-/* ---------- Wedstrijdverslag ---------- */
 function buildAutoReport(m){
   const t = currentTeam(); const us = t ? t.name : 'Wij';
   const ourHome = m.homeAway !== 'Uit';
@@ -1882,8 +1754,7 @@ function matchReportData(m){
   }).filter(Boolean).join('\n');
   return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\nNotities: ${m.notes||'-'}\nGebeurtenissen:\n${evs||'-'}`;
 }
-// Vraag Google welke modellen deze sleutel mag gebruiken; geef een gesorteerde lijst
-// kandidaten terug (flash-modellen eerst, nieuwste versie eerst).
+
 async function geminiCandidates(key){
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`);
   const j = await res.json().catch(()=>null);
@@ -1894,12 +1765,12 @@ async function geminiCandidates(key){
   const ver = (mo)=>{ const mm = name(mo).match(/gemini-(\d+(?:\.\d+)?)/); return mm?parseFloat(mm[1]):0; };
   const score = (mo)=>{
     let s = ver(mo)*10;
-    if (/flash/.test(name(mo))) s += 5;                          // flash: snel + goedkoop
-    if (/vision|image|thinking|embedding|tts|audio/.test(name(mo))) s -= 100; // ongeschikt
+    if (/flash/.test(name(mo))) s += 5;
+    if (/vision|image|thinking|embedding|tts|audio/.test(name(mo))) s -= 100;
     if (/latest/.test(name(mo))) s += 1;
     return s;
   };
-  return models.slice().sort((a,b)=>score(b)-score(a)).map(name); // ["models/gemini-3.6-flash", ...]
+  return models.slice().sort((a,b)=>score(b)-score(a)).map(name);
 }
 async function generateReport(){
   const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
@@ -1911,7 +1782,7 @@ async function generateReport(){
   let lastErr = '';
   try {
     const candidates = await geminiCandidates(key);
-    for (const modelName of candidates.slice(0, 6)){   // probeer de beste paar tot er één werkt
+    for (const modelName of candidates.slice(0, 6)){
       try {
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
           method:'POST', headers:{'Content-Type':'application/json'},
@@ -1932,21 +1803,9 @@ async function generateReport(){
   }
 }
 
-/* ==================================================================
-   TIMER – bron van de waarheid staat in Firebase (collectie 'timers')
-   ------------------------------------------------------------------
-   Per wedstrijd 1 document: timers/{matchId} met velden
-     startTime      : server-timestamp van de laatste 'start' (of null bij pauze)
-     accumulatedMs  : opgebouwde tijd tot de laatste pauze (ms)
-     half           : 1 of 2
-     running        : true/false
-   Verstreken tijd op het scherm = accumulatedMs + (nu - startTime).
-   Alleen admins schrijven; iedereen leest en ziet dezelfde tijd live.
-   Zonder Firebase (lokaal) werkt dezelfde logica met de lokale klok.
-   ================================================================== */
 let TIMER = { startTimeMs:null, accumulatedMs:0, half:1, running:false };
-let TIMER_UNSUB = null;   // Firestore-listener
-let TIMER_TICK = null;    // scherm-ticker (1x per seconde)
+let TIMER_UNSUB = null;
+let TIMER_TICK = null;
 
 function timerRef(){ return db.collection('timers').doc(LIVE.matchId); }
 function computeElapsedSeconds(){
@@ -1966,7 +1825,7 @@ function stopDisplayTick(){ if (TIMER_TICK){ clearInterval(TIMER_TICK); TIMER_TI
 
 function subscribeTimer(matchId){
   unsubscribeTimer();
-  if (!db) return;   // lokale modus gebruikt TIMER direct
+  if (!db) return;
   TIMER_UNSUB = db.collection('timers').doc(matchId).onSnapshot(snap => {
     const d = snap.exists ? snap.data() : null;
     TIMER = {
@@ -1976,7 +1835,7 @@ function subscribeTimer(matchId){
       running: !!(d && d.running)
     };
     refreshTimerDisplay();
-    if (view()==='live' || view()==='dashboard') render();   // knoplabels/LIVE-badge bijwerken
+    if (view()==='live' || view()==='dashboard') render();
   }, err => console.error('Timer-listener:', err));
 }
 function unsubscribeTimer(){ if (TIMER_UNSUB){ TIMER_UNSUB(); TIMER_UNSUB = null; } }
@@ -2019,7 +1878,6 @@ async function timerSetHalf(half){
   } else { TIMER.half=half; TIMER.accumulatedMs=baseMs; TIMER.startTimeMs = half===2?Date.now():null; TIMER.running = half===2; refreshTimerDisplay(); render(); }
 }
 
-/* ---------- CSV export ---------- */
 function exportCSV(t, s){
   const rows = computeStats(t.id, s.id).sort((a,b)=>b.goals-a.goals);
   const head = ['Speler','Rugnummer','Positie','Gespeeld','Basisplaatsen','Wisselbeurten','Goals','Assists','CleanSheets','Geel','Rood','Speelminuten'];
@@ -2031,20 +1889,98 @@ function exportCSV(t, s){
   downloadBlob(new Blob(['﻿'+lines.join('\n')], { type:'text/csv;charset=utf-8;' }), safe(`statistieken_${t.name}_${s.name}`)+'.csv');
 }
 
-/* ---------- Screenshot / print ---------- */
-function printOrShot(el, name){
-  if (window.html2canvas && el){
-    html2canvas(el, { backgroundColor:'#171717', scale:2 }).then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'))).catch(() => window.print());
-  } else { window.print(); }
-}
-function shotTimeline(){
-  const el = document.getElementById('timelineArea');
+/* ---------- Screenshot / print Functies ---------- */
+
+// Screenshot van VERLOOP + VERSLAG SAMEN
+function shotTimelineWithReport(){
+  const timelineEl = document.getElementById('timelineArea');
+  const reportEl = document.getElementById('reportArea');
   const m = DATA.matches.find(x => x.id === LIVE.matchId);
-  const name = m ? `verloop_${matchTitle(m)}_${m.date}` : 'wedstrijdverloop';
-  if (window.html2canvas && el){
-    html2canvas(el, { backgroundColor:'#171717', scale:2 }).then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'))).catch(() => alert('Screenshot maken lukte niet in deze weergave. Open de app in een browsertabblad.'));
-  } else { alert('Screenshot maken vereist internet (voor html2canvas). Open de app in een browsertabblad.'); }
+  const name = m ? `verloop_en_verslag_${matchTitle(m)}_${m.date}` : 'verloop_en_verslag';
+
+  if (!window.html2canvas || !timelineEl){
+    alert('Screenshot maken vereist internet (voor html2canvas). Open de app in een browsertabblad.');
+    return;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.style.padding = '16px';
+  wrapper.style.background = '#171717';
+  wrapper.style.color = '#ffffff';
+  wrapper.style.width = '450px';
+
+  const timelineClone = timelineEl.cloneNode(true);
+  wrapper.appendChild(timelineClone);
+
+  if (reportEl) {
+    const reportHeader = document.createElement('h3');
+    reportHeader.textContent = 'Wedstrijdverslag';
+    reportHeader.style.margin = '16px 0 8px 0';
+    reportHeader.style.fontWeight = 'bold';
+    
+    const reportClone = reportEl.cloneNode(true);
+    
+    wrapper.appendChild(reportHeader);
+    wrapper.appendChild(reportClone);
+  }
+
+  document.body.appendChild(wrapper);
+
+  html2canvas(wrapper, { backgroundColor:'#171717', scale:2 })
+    .then(canvas => canvas.toBlob(blob => {
+      downloadBlob(blob, safe(name)+'.png');
+      wrapper.remove();
+    }))
+    .catch(() => {
+      wrapper.remove();
+      alert('Screenshot maken lukte niet in deze weergave. Open de app in een browsertabblad.');
+    });
 }
+
+// Screenshot van ALLEEN het verslag
+function shotReport(){
+  const el = document.getElementById('reportArea');
+  const m = DATA.matches.find(x => x.id === LIVE.matchId);
+  const name = m ? `verslag_${matchTitle(m)}_${m.date}` : 'wedstrijdverslag';
+
+  if (window.html2canvas && el){
+    html2canvas(el, { backgroundColor:'#171717', scale:2 })
+      .then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png')))
+      .catch(() => alert('Screenshot maken lukte niet.'));
+  } else {
+    alert('Geen verslag gevonden of html2canvas niet geladen.');
+  }
+}
+
+// Screenshot van de VOLLEDIGE statistiekentabel (geen afgesneden kolommen meer)
+function printTableFull(t, s){
+  const tableArea = document.getElementById('printArea');
+  if (!tableArea) return;
+
+  const origOverflow = tableArea.style.overflow;
+  const origWidth = tableArea.style.width;
+
+  tableArea.style.overflow = 'visible';
+  tableArea.style.width = tableArea.scrollWidth + 'px';
+
+  html2canvas(tableArea, {
+    backgroundColor: document.documentElement.classList.contains('light') ? '#ffffff' : '#171717',
+    scale: 2,
+    windowWidth: tableArea.scrollWidth + 100
+  }).then(canvas => {
+    tableArea.style.overflow = origOverflow;
+    tableArea.style.width = origWidth;
+
+    const name = (t && s) ? `statistieken_${t.name}_${s.name}` : 'statistieken';
+    canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'));
+  }).catch(err => {
+    tableArea.style.overflow = origOverflow;
+    tableArea.style.width = origWidth;
+    console.error('Screenshot mislukt:', err);
+    alert('Screenshot maken mislukt.');
+  });
+}
+
 function safe(n){ return String(n).replace(/[^\w.\-]+/g,'_'); }
 function downloadBlob(blob, filename){
   const url = URL.createObjectURL(blob);
@@ -2053,9 +1989,6 @@ function downloadBlob(blob, filename){
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
 
-/* ==================================================================
-   OPSTARTEN
-   ================================================================== */
 function showSetupBanner(){
   if (FIREBASE_READY) return;
   const b = document.createElement('div');
@@ -2063,7 +1996,7 @@ function showSetupBanner(){
   b.innerHTML = '⚠ Firebase nog niet ingesteld — plak je config bovenin de code (zoek op <b>PLAK_HIER</b>). De app werkt nu lokaal op dit toestel.';
   document.body.prepend(b);
 }
-/* ---------- Meldingen bij doelpunt (per toestel, alleen als de app open staat) ---------- */
+
 let KNOWN_GOAL_IDS = new Set();
 function collectGoalIds(data){ const s=new Set(); (data&&data.matches||[]).forEach(m=>(m.events||[]).forEach(e=>{ if(e.type==='goal') s.add(e.id); })); return s; }
 function notifyNewGoals(newData){
@@ -2086,20 +2019,19 @@ function notifyNewGoals(newData){
 
 let APP_STARTED = false;
 async function startApp(){
-  if (APP_STARTED) { render(); return; }   // bij herinloggen niet dubbel abonneren
+  if (APP_STARTED) { render(); return; }
   APP_STARTED = true;
   DATA = await Database.load();
-  KNOWN_GOAL_IDS = collectGoalIds(DATA);   // bestaande goals niet als "nieuw" melden
+  KNOWN_GOAL_IDS = collectGoalIds(DATA);
   Database.subscribe((newData) => { try { notifyNewGoals(newData); } catch(e){} DATA = newData; render(); });
   render();
 }
 
 async function boot(){
   applyTheme();
-  PREFS.view = 'dashboard';   // altijd op Overzicht starten
+  PREFS.view = 'dashboard';
   showSetupBanner();
   if (FIREBASE_READY && auth){
-    // Wacht op de inlogstatus. Niet ingelogd -> render() toont het inlogscherm.
     auth.onAuthStateChanged(async (user) => {
       CURRENT_USER = user;
       MEMBERS_LOADED = false;
@@ -2111,9 +2043,8 @@ async function boot(){
       PENDING_USERNAME = null;
       startApp();
     });
-    render();   // toont alvast het inlogscherm terwijl Firebase de sessie checkt
+    render();
   } else {
-    // Lokale modus (geen Firebase): meteen starten, alles bewerkbaar.
     startApp();
   }
 }
