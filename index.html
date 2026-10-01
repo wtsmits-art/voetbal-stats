@@ -1110,15 +1110,32 @@ function ensureSquad(m){
   const all = teamPlayers(m.teamId).map(p=>p.id);
   if (!Array.isArray(m.onField)) m.onField = (m.lineup||[]).filter(id=>all.includes(id));
   if (!Array.isArray(m.onBench)) m.onBench = [];
-  if (!Array.isArray(m.onAbsent)) m.onAbsent = [];
-  const known = new Set([...m.onField, ...m.onBench, ...m.onAbsent]);
+  if (!Array.isArray(m.onSelection)) m.onSelection = [];
+  if (!Array.isArray(m.onGuests)) m.onGuests = [];
+  
+  // Oude migratie: als er nog 'onAbsent' was, verplaatsen naar selection/guests
+  if (Array.isArray(m.onAbsent)) {
+    m.onAbsent.forEach(id => {
+      const p = playerById(id);
+      if (p && playerGroup(p) === 'gast') m.onGuests.push(id);
+      else m.onSelection.push(id);
+    });
+    delete m.onAbsent;
+  }
+
+  const known = new Set([...m.onField, ...m.onBench, ...m.onSelection, ...m.onGuests]);
+  
+  // Nieuwe/niet-ingedeelde spelers verdelen over Selectie en Gasten
   all.filter(id=>!known.has(id)).forEach(id => {
-    if (playerGroup(playerById(id)) === 'gast') m.onAbsent.push(id);
-    else m.onBench.push(id);
+    const p = playerById(id);
+    if (p && playerGroup(p) === 'gast') m.onGuests.push(id);
+    else m.onSelection.push(id);
   });
+
   m.onField = m.onField.filter(id=>all.includes(id));
   m.onBench = m.onBench.filter(id=>all.includes(id));
-  m.onAbsent = m.onAbsent.filter(id=>all.includes(id));
+  m.onSelection = m.onSelection.filter(id=>all.includes(id));
+  m.onGuests = m.onGuests.filter(id=>all.includes(id));
 }
 function fieldPlayerIds(m){
   const ids = (m && m.onField && m.onField.length) ? m.onField : (m && m.lineup || []);
@@ -1168,19 +1185,33 @@ function renderLineupBody(){
   const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
   ensureSquad(m); ensurePositions(m);
   const el = document.getElementById('lineupBody'); if(!el) return;
+  
   const fieldChips = (m.onField||[]).map(id=>{ const p=playerById(id); return p?fieldChipHTML(p, m.positions[id]||defaultFieldPos(0,1)):''; }).join('');
   const benchChips = (m.onBench||[]).map(id=>{ const p=playerById(id); return p?benchChipHTML(p):''; }).join('') || '<span class="text-neutral-600 text-xs p-2">Bank leeg</span>';
-  const absentChips = (m.onAbsent||[]).map(id=>{ const p=playerById(id); return p?benchChipHTML(p):''; }).join('') || '<span class="text-neutral-600 text-xs p-2">Iedereen aanwezig</span>';
+  const selectionChips = (m.onSelection||[]).map(id=>{ const p=playerById(id); return p?benchChipHTML(p):''; }).join('') || '<span class="text-neutral-600 text-xs p-2">Geen selectiespelers</span>';
+  const guestChips = (m.onGuests||[]).map(id=>{ const p=playerById(id); return p?benchChipHTML(p):''; }).join('') || '<span class="text-neutral-600 text-xs p-2">Geen gastspelers</span>';
+
   const started = timerStartedNow();
+  const fieldCount = (m.onField||[]).length;
+
   el.innerHTML = `
-    <p class="text-sm text-neutral-400 mb-1">Sleep spelers <b>vrij op het veld</b>, of tussen veld, bank en "niet aanwezig". ${started?'De wedstrijd loopt: slepen tussen veld en bank = automatisch een <b>wissel</b>.':'Vóór de aftrap = je <b>basisopstelling</b>.'}</p>
+    <p class="text-sm text-neutral-400 mb-1">Sleep spelers van <b>Selectie / Gasten</b> naar <b>Basis</b> (max 11) of <b>Bank</b>. ${started?'De wedstrijd loopt: slepen tussen basis en bank = automatisch een <b>wissel</b>.':'Vóór de aftrap = je <b>basisopstelling</b>.'}</p>
     <div id="subBadge" class="hidden text-green-400 text-sm font-semibold mb-2"></div>
-    <div class="text-[11px] text-neutral-500 mb-1">Veld · ${(m.onField||[]).length}</div>
-    <div id="fieldZone" class="pitch mb-3" style="height:56vh;position:relative;">${fieldChips}</div>
-    <div class="text-[11px] text-neutral-500 mb-1">Bank (aanwezig)</div>
-    <div id="benchZone" class="card p-2 flex flex-wrap gap-2 min-h-[72px] mb-3">${benchChips}</div>
-    <div class="text-[11px] text-neutral-500 mb-1">Niet aanwezig <span class="opacity-60">— tellen niet mee bij goals/wissels</span></div>
-    <div id="absentZone" class="card p-2 flex flex-wrap gap-2 min-h-[56px] opacity-80">${absentChips}</div>`;
+    
+    <div class="flex items-center justify-between text-[11px] text-neutral-500 mb-1">
+      <span>Basis (veld)</span>
+      <span class="${fieldCount > 11 ? 'text-red-400 font-bold' : 'text-neutral-400'}">${fieldCount} / 11 spelers</span>
+    </div>
+    <div id="fieldZone" class="pitch mb-3" style="height:52vh;position:relative;">${fieldChips}</div>
+    
+    <div class="text-[11px] text-neutral-500 mb-1">Bank (wisselspelers)</div>
+    <div id="benchZone" class="card p-2 flex flex-wrap gap-2 min-h-[64px] mb-3">${benchChips}</div>
+    
+    <div class="text-[11px] text-neutral-500 mb-1">Selectie <span class="opacity-60">— niet ingedeeld</span></div>
+    <div id="selectionZone" class="card p-2 flex flex-wrap gap-2 min-h-[56px] mb-3 opacity-80">${selectionChips}</div>
+
+    <div class="text-[11px] text-neutral-500 mb-1">Gasten <span class="opacity-60">— niet ingedeeld</span></div>
+    <div id="guestZone" class="card p-2 flex flex-wrap gap-2 min-h-[56px] opacity-80">${guestChips}</div>`;
   attachLineupDrag();
 }
 function attachLineupDrag(){
@@ -1201,17 +1232,39 @@ function startLineupDrag(e, ch){
 }
 function dropLineup(pid, x, y){
   const m = DATA.matches.find(z=>z.id===LIVE.matchId); if(!m) return;
-  const pitch = document.getElementById('fieldZone'), bench = document.getElementById('benchZone'), absent = document.getElementById('absentZone');
-  if(!pitch||!bench){ return; }
+  const pitch = document.getElementById('fieldZone');
+  const bench = document.getElementById('benchZone');
+  const selection = document.getElementById('selectionZone');
+  const guest = document.getElementById('guestZone');
+
+  if(!pitch||!bench) return;
   const inRect = (el) => { if(!el) return false; const r=el.getBoundingClientRect(); return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom; };
+  
   const wasField = (m.onField||[]).includes(pid);
   const started = timerStartedNow();
-  const removeFromAll = () => { m.onField=(m.onField||[]).filter(id=>id!==pid); m.onBench=(m.onBench||[]).filter(id=>id!==pid); m.onAbsent=(m.onAbsent||[]).filter(id=>id!==pid); };
-  if(inRect(pitch)){
+  const p = playerById(pid);
+  const isGuest = p && playerGroup(p) === 'gast';
+
+  const removeFromAll = () => {
+    m.onField = (m.onField||[]).filter(id=>id!==pid);
+    m.onBench = (m.onBench||[]).filter(id=>id!==pid);
+    m.onSelection = (m.onSelection||[]).filter(id=>id!==pid);
+    m.onGuests = (m.onGuests||[]).filter(id=>id!==pid);
+  };
+
+  if (inRect(pitch)) {
+    // Check op maximaal 11 spelers in de basis
+    if (!wasField && (m.onField||[]).length >= 11) {
+      alert('Er staan al 11 spelers in de basis. Wissel eerst een speler naar de bank of selectie.');
+      renderLineupBody();
+      return;
+    }
+
     const pr = pitch.getBoundingClientRect();
     const nx = Math.min(94, Math.max(6, (x-pr.left)/pr.width*100));
     const ny = Math.min(94, Math.max(6, (y-pr.top)/pr.height*100));
     m.positions = m.positions || {}; m.positions[pid] = { x:nx, y:ny };
+    
     if(!wasField){
       pushUndo(m);
       removeFromAll(); (m.onField=m.onField||[]).push(pid);
@@ -1219,8 +1272,9 @@ function dropLineup(pid, x, y){
       else { m.lineup = (m.onField||[]).slice(); }
     }
     commitLineup(m);
-  } else if(inRect(bench)){
-    if(!(m.onBench||[]).includes(pid)){
+  } 
+  else if (inRect(bench)) {
+    if (!(m.onBench||[]).includes(pid)){
       pushUndo(m);
       if(wasField && m.positions) delete m.positions[pid];
       removeFromAll(); (m.onBench=m.onBench||[]).push(pid);
@@ -1228,16 +1282,22 @@ function dropLineup(pid, x, y){
       else if(!started){ m.lineup = (m.onField||[]).slice(); }
     }
     commitLineup(m);
-  } else if(inRect(absent)){
-    if(!(m.onAbsent||[]).includes(pid)){
+  } 
+  else if (inRect(selection) || inRect(guest)) {
+    const targetZone = isGuest ? m.onGuests : m.onSelection;
+    if (!targetZone.includes(pid)){
       pushUndo(m);
       if(wasField && m.positions) delete m.positions[pid];
-      removeFromAll(); (m.onAbsent=m.onAbsent||[]).push(pid);
+      removeFromAll();
+      if (isGuest) (m.onGuests=m.onGuests||[]).push(pid);
+      else (m.onSelection=m.onSelection||[]).push(pid);
+
       if(wasField && started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
       else if(!started){ m.lineup = (m.onField||[]).slice(); }
     }
     commitLineup(m);
-  } else {
+  } 
+  else {
     renderLineupBody();
   }
 }
@@ -1614,10 +1674,17 @@ async function handleAct(act, ds){
     }
     case 'clearLineup': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
-      if (!confirm('Alle spelers van het veld naar de bank verplaatsen?')) return;
-      const all = teamPlayers(m.teamId).map(p=>p.id);
-      m.onField = []; m.positions = {};
-      m.onBench = all.slice();
+      if (!confirm('Basis en bank leegmaken en iedereen terugzetten naar Selectie/Gasten?')) return;
+      
+      m.onField = []; 
+      m.onBench = [];
+      m.positions = {};
+      
+      // Iedereen netjes terugzetten in hun eigen vak
+      const all = teamPlayers(m.teamId);
+      m.onSelection = all.filter(p => playerGroup(p) !== 'gast').map(p => p.id);
+      m.onGuests = all.filter(p => playerGroup(p) === 'gast').map(p => p.id);
+
       if (!timerStartedNow()) m.lineup = [];
       renderLineupBody();
       try { await Database.save(DATA); } catch(e){ console.error(e); }
