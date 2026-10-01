@@ -786,9 +786,9 @@ function liveView(t, s){
         <h3 class="font-bold">Verslag</h3>
         <button data-act="generateReport" class="btn text-green-400 text-sm font-semibold">✨ Genereer</button>
       </div>
-      <div id="reportArea" class="card p-3 text-sm ${m.report?'':'text-neutral-500'}">
-        ${m.report?esc(m.report):'Nog geen verslag. Rond de wedstrijd af of tik op Genereer (gebruikt notities + scoreverloop).'}
-      </div>
+      <div id="reportArea" class="card p-4 text-sm whitespace-pre-line ${m.report?'':'text-neutral-500'}">
+  ${m.report ? m.report : 'Nog geen verslag. Rond de wedstrijd af of tik op Genereer (gebruikt notities + scoreverloop).'}
+</div>
       <button data-act="shotReport" class="btn w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl font-semibold mt-2 text-sm">
         🖼 Screenshot van verslag opslaan
       </button>
@@ -901,7 +901,7 @@ function matchSummaryView(m){
         </div>
         <div>${logoBox(rightLogo)}<div class="mt-2 font-semibold text-sm leading-tight">${esc(rightName)}</div></div>
       </div>
-      ${m.report ? `<h3 class="text-lg font-bold mt-5 mb-1">Verslag</h3><div class="card p-3 text-sm">${esc(m.report)}</div>` : ''}
+     ${m.report ? `<h3 class="text-lg font-bold mt-5 mb-1">Verslag</h3><div class="card p-4 text-sm whitespace-pre-line">${m.report}</div>` : ''}
       <h3 class="text-lg font-bold mt-5 mb-1">Samenvatting</h3>
       ${(h1.length||h2.length) ? section('1E HELFT', h1) + section('2E HELFT', h2)
          : '<div class="card p-4 text-neutral-400 text-sm">Nog geen gebeurtenissen geregistreerd.</div>'}
@@ -1774,7 +1774,7 @@ function matchReportData(m){
   const t = currentTeam();
   const s = currentSeason();
   
-  // 1. Seizoensstatistieken verzamelen voor context (topscorers, meeste assists)
+  // Seizoensstatistieken voor context
   const stats = (t && s) ? computeStats(t.id, s.id) : [];
   const sortedGoals = [...stats].sort((a,b)=>b.goals-a.goals);
   const sortedAssists = [...stats].sort((a,b)=>b.assists-a.assists);
@@ -1783,10 +1783,10 @@ function matchReportData(m){
     if (p.goals === 0 && p.assists === 0) return null;
     const gRank = sortedGoals.findIndex(x=>x.id===p.id) + 1;
     const aRank = sortedAssists.findIndex(x=>x.id===p.id) + 1;
-    return `${p.name}: dit seizoen ${p.goals} goals (plek ${gRank} in team) en ${p.assists} assists (plek ${aRank} in team)`;
+    return `${p.name}: ${p.goals} goals (plek ${gRank}) en ${p.assists} assists (plek ${aRank})`;
   }).filter(Boolean).join('\n');
 
-  // 2. Gebeurtenissen uit de wedstrijd verzamelen
+  // Chronologisch verloop + notities samenvoegen
   const chronology = [];
 
   (m.events||[]).forEach(e => {
@@ -1798,28 +1798,24 @@ function matchReportData(m){
     if (txt) chronology.push({ minute: e.minute, text: txt });
   });
 
-  // 3. Notities scannen op minuut-notaties zoals "12min)" of "12 min" of "12')"
   if (m.notes && m.notes.trim()) {
-    const lines = m.notes.split('\n');
-    lines.forEach(line => {
+    m.notes.split('\n').forEach(line => {
       const match = line.match(/\((\d+)\s*(?:min\vert{}minuut\vert{}')?\)/i);
       if (match) {
         const min = parseInt(match[1]);
         const cleanNote = line.replace(/\(\d+\s*(?:min\vert{}minuut\vert{}')?\)/i, '').trim();
-        chronology.push({ minute: min, text: `Opmerking/Actie: ${cleanNote}` });
+        chronology.push({ minute: min, text: `Opmerking: ${cleanNote}` });
       } else if (line.trim()) {
-        // Algemene notitie zonder minuut
-        chronology.push({ minute: 999, text: `Algemene notitie: ${line.trim()}` });
+        chronology.push({ minute: 999, text: `Sfeer/Algemeen: ${line.trim()}` });
       }
     });
   }
 
-  // 4. Chronologisch sorteren op minuut
   chronology.sort((a,b) => a.minute - b.minute);
 
-  const timelineText = chronology.map(c => c.minute === 999 ? `- ${c.text}` : `${c.minute}' ${c.text}`).join('\n');
+  const timelineText = chronology.map(c => c.minute === 999 ? `- ${c.text}` : `${c.minute}' (${c.minute <= 45 ? '1e helft' : '2e helft'}): ${c.text}`).join('\n');
 
-  return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\n\nSEIZOENSSTATISTIEKEN SPELERS (voor context):\n${statsContext || 'Geen seizoensdata'}\n\nCHRONOLOGISCH WEDSTRIJDVERLOOP & NOTITIES:\n${timelineText || 'Geen acties geregistreerd'}`;
+  return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\n\nSEIZOENSCONTEXT:\n${statsContext || 'Geen seizoensdata'}\n\nVERLOOP & NOTITIES:\n${timelineText || 'Geen gebeurtenissen'}`;
 }
 
 async function geminiCandidates(key){
@@ -1843,17 +1839,24 @@ async function generateReport(){
   const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
   const key = (PREFS.geminiKey||'').trim();
   
-  // Als er geen Gemini API-sleutel is, gebruik de verbeterde standaard samenvatting
   if (!key){ pushUndo(m); m.report = buildAutoReport(m); return commit(); }
 
-  const prompt = `Je bent een enthousiaste, ietwat overdreven en humoristische amateurvoetbal-verslaggever voor de vereniging. Schrijf een smeuïg, vlot leesbaar en spectaculair wedstrijdverslag (3 tot 5 zinnen).
+  const prompt = `Je bent een enthousiaste amateurvoetbal-verslaggever. Schrijf een leuk, vlot en goed leesbaar wedstrijdverslag.
 
-STRIKTE REGELS VOOR GRAMMATICA EN STIJL:
-1. Gebruik perfecte Nederlandse spelling en grammatica. Corrigeer eventuele spelfouten uit de ruwe input (bijv. "versiert" wordt "versierd", "zon overgoten" wordt "zondergaten" of "zonnig", "t veld" wordt "het veld").
-2. Gebruik een vlotte kantine-toon (heldenrol, spektakel, lichte overdrijving).
-3. Verweef de notities en gebeurtenissen chronologisch tot één vloeiend verhaal. Plak GEEN losse lijsten of minuutaanduidingen tussen haakjes in de tekst.
-4. Als een speler die scoort of assisteert hoog staat in de seizoensstatistieken (bijv. topscorer of assistkoning), benoem dit dan op een leuke manier!
-5. Gebruik UITSLUITEND de meegegeven feiten, namen en standen. Verzin geen fictieve spelers of uitslagen.
+STRUCTUUR & OPMAAK:
+1. Begin met een korte, pakkende en creatieve titel. Zet deze tussen <h2> en </h2> (bijv: <h2>Spektakelstuk op een zonnig sportpark</h2>).
+2. Verdeel het verslag daarna in duidelijke alinea's met een lege regel ertussen:
+   - Alinea 1: Sfeer & De 1e helft.
+   - Alinea 2: De 2e helft & Hoogtepunten.
+   - Alinea 3: Korte slotconclusie.
+
+REGELS VOOR TAALGEBRUIK EN INHOUD:
+1. Gebruik normale, begrijpelijke taal (geen moeilijke of ouderwetse woorden zoals 'lazaret', 'reminiscentie', etc.).
+2. Vlot, enthousiast en met gezonde amateurvoetbal-humor geschreven.
+3. Corrigeer spelfouten uit de ruwe notities (bijv. "versiert" wordt "versierd").
+4. Verwerk acties/notities chronologisch in de juiste helft.
+5. Als een doelpuntmaker of assistgever hoog staat in de seizoensstatistieken (bijv. topscorer), benoem dit leuk!
+6. Gebruik UITSLUITEND de meegegeven feiten, namen en uitslag.
 
 WEDSTRIJDGEGEVENS:
 ${matchReportData(m)}`;
