@@ -1729,19 +1729,45 @@ function openEditEvent(eid){
 }
 
 function buildAutoReport(m){
-  const t = currentTeam(); const us = t ? t.name : 'Wij';
+  const t = currentTeam(); const us = t ? t.name : 'Ons team';
   const ourHome = m.homeAway !== 'Uit';
   const opp = m.opponent || 'de tegenstander';
-  const evs = (m.events||[]).slice().sort((a,b)=>a.minute-b.minute);
-  const ownGoals = evs.filter(e=>e.type==='goal'&&e.team!=='opp');
-  const cards = evs.filter(e=>e.type==='card'&&e.team!=='opp');
   const our = ourHome ? m.homeScore : m.awayScore, their = ourHome ? m.awayScore : m.homeScore;
   const uitslag = our>their?'een overwinning':our<their?'een nederlaag':'een gelijkspel';
+
   const lines = [];
   lines.push(`${us} speelde ${String(m.homeAway||'').toLowerCase()} tegen ${opp} en het werd ${our}-${their} — ${uitslag}.`);
-  if (ownGoals.length) lines.push('Doelpunten: ' + ownGoals.map(e=>`${displayName(e.playerId)} (${e.minute}'${e.assistId?`, assist ${displayName(e.assistId)}`:''})`).join(', ') + '.');
-  if (cards.length) lines.push('Kaarten: ' + cards.map(e=>`${displayName(e.playerId)} ${cardAdj(e.cardType)} (${e.minute}')`).join(', ') + '.');
-  if (m.notes && m.notes.trim()) lines.push('Opmerkingen: ' + m.notes.trim());
+
+  // Chronologische lijst maken van events + notities
+  const chrono = [];
+  (m.events||[]).forEach(e => {
+    if (e.type === 'goal') {
+      const who = e.team==='opp' ? opp : displayName(e.playerId);
+      const assist = (e.team!=='opp' && e.assistId) ? ` (assist ${displayName(e.assistId)})` : '';
+      chrono.push({ min: e.minute, txt: `doelpunt door ${who}${assist}` });
+    }
+  });
+
+  if (m.notes && m.notes.trim()) {
+    m.notes.split('\n').forEach(line => {
+      const match = line.match(/\((\d+)\s*(?:min\vert{}minuut\vert{}')?\)/i);
+      if (match) {
+        const min = parseInt(match[1]);
+        const clean = line.replace(/\(\d+\s*(?:min\vert{}minuut\vert{}')?\)/i, '').trim();
+        chrono.push({ min, txt: clean });
+      } else if (line.trim()) {
+        lines.push(line.trim());
+      }
+    });
+  }
+
+  chrono.sort((a,b) => a.min - b.min);
+
+  if (chrono.length) {
+    const verloopStr = chrono.map(c => `in de ${c.min}e minuut (${c.txt})`).join(', ');
+    lines.push(`Belangrijkste momenten: ${verloopStr}.`);
+  }
+
   return lines.join(' ');
 }
 function matchReportData(m){
@@ -1816,18 +1842,22 @@ async function geminiCandidates(key){
 async function generateReport(){
   const m = DATA.matches.find(x=>x.id===LIVE.matchId); if(!m) return;
   const key = (PREFS.geminiKey||'').trim();
+  
+  // Als er geen Gemini API-sleutel is, gebruik de verbeterde standaard samenvatting
   if (!key){ pushUndo(m); m.report = buildAutoReport(m); return commit(); }
-const prompt = `Je bent een enthousiaste, ietwat overdreven en humoristische amateurvoetbal-verslaggever. Schrijf een smeuïg en leuk leesbaar wedstrijdverslag (plus minus 10 zinnen). 
 
-Richtlijnen:
-1. Gebruik een vlotte, enthousiaste amateurvoetbal-toon (denk aan Kantine-praat, heldenrol, spektakel). Lichte overdrijving is toegestaan!
-2. Verwerk de chronologische gebeurtenissen en notities op het juiste moment in het verhaal.
-3. Als een speler die scoort of assisteert hoog staat in de seizoensstatistieken (bijv. topscorer, nummer 2, of assistkoning), benoem dit dan op een leuke manier!
-4. Gebruik UITSLUITEND de meegegeven feiten, namen en standen. Verzin geen doelpuntmakers of uitslagen die er niet staan.
-5. Gegevens uit de Notities overdreven en humoristische brengen
+  const prompt = `Je bent een enthousiaste, ietwat overdreven en humoristische amateurvoetbal-verslaggever voor de vereniging. Schrijf een smeuïg, vlot leesbaar en spectaculair wedstrijdverslag (3 tot 5 zinnen).
+
+STRIKTE REGELS VOOR GRAMMATICA EN STIJL:
+1. Gebruik perfecte Nederlandse spelling en grammatica. Corrigeer eventuele spelfouten uit de ruwe input (bijv. "versiert" wordt "versierd", "zon overgoten" wordt "zondergaten" of "zonnig", "t veld" wordt "het veld").
+2. Gebruik een vlotte kantine-toon (heldenrol, spektakel, lichte overdrijving).
+3. Verweef de notities en gebeurtenissen chronologisch tot één vloeiend verhaal. Plak GEEN losse lijsten of minuutaanduidingen tussen haakjes in de tekst.
+4. Als een speler die scoort of assisteert hoog staat in de seizoensstatistieken (bijv. topscorer of assistkoning), benoem dit dan op een leuke manier!
+5. Gebruik UITSLUITEND de meegegeven feiten, namen en standen. Verzin geen fictieve spelers of uitslagen.
 
 WEDSTRIJDGEGEVENS:
 ${matchReportData(m)}`;
+
   const btn = [...document.querySelectorAll('[data-act="generateReport"]')][0];
   if (btn){ btn.textContent = '⏳ Bezig…'; btn.style.pointerEvents='none'; }
   let lastErr = '';
@@ -1849,8 +1879,7 @@ ${matchReportData(m)}`;
     throw new Error(lastErr || 'Geen werkend model gevonden.');
   } catch(e){
     pushUndo(m); m.report = buildAutoReport(m); await commit();
-    alert('AI-verslag lukte niet, automatische samenvatting gebruikt.\n\nReden: ' + (e.message||e) +
-      '\n\nControleer: 1) sleutel juist gekopieerd, 2) bij je sleutel is de "Generative Language API" ingeschakeld, 3) geen sleutel-restrictie die jouw domein blokkeert.');
+    alert('AI-verslag lukte niet, automatische samenvatting gebruikt.\n\nReden: ' + (e.message||e));
   }
 }
 
