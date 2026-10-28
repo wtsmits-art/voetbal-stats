@@ -58,6 +58,7 @@
     #printArea{position:absolute;left:0;top:0;width:100%;color:#000;background:#fff;}
     #printArea table{color:#000;}
   }
+  tr.row-hl td{background:rgba(34,197,94,.22);}
 </style>
 </head>
 <body class="max-w-lg mx-auto pb-24 select-none">
@@ -183,6 +184,35 @@ const fmtTime = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%6
 function timerHTML(){
   const { reg, stop } = timerParts();
   return fmtTime(reg) + (stop>0 ? ` <span class="text-red-500">[+${fmtTime(stop)}]</span>` : '');
+}
+
+// Minuut-weergave met blessuretijd: 45+x in 1e helft, 90+x in 2e helft
+function fmtMinute(e){
+  const h = e.half || (e.minute<=45 ? 1 : 2);
+  if (h===1 && e.minute>45) return '45+'+(e.minute-45);
+  if (h===2 && e.minute>90) return '90+'+(e.minute-90);
+  return String(e.minute);
+}
+function evHalf(e){ return e.half || (e.minute<=45 ? 1 : 2); }
+function liveMinLabel(){ return fmtMinute({ minute: liveMin(), half: LIVE.half }); }
+
+// Verslag opschonen (geen AI-streepjes, geen losse html/markdown-tekens)
+function cleanReport(txt){
+  return String(txt||'')
+    .replace(/<\/?[^>]+>/g, '')
+    .replace(/\*\*/g, '').replace(/^#{1,6}\s*/gm, '')
+    .replace(/\s*—\s*/g, ', ').replace(/ – /g, ', ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+// Verslag renderen: eerste regel vetgedrukt als titel
+function reportHTML(txt){
+  const lines = String(txt||'').split('\n');
+  let i = 0; while (i<lines.length && !lines[i].trim()) i++;
+  if (i>=lines.length) return '';
+  const title = lines[i];
+  const rest = lines.slice(i+1).join('\n').replace(/^\n+/, '');
+  return `<strong class="block text-base mb-1">${esc(title)}</strong>${esc(rest)}`;
 }
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -359,7 +389,7 @@ function eventRow(e, allowDelete, homeSide){
     }
   }
   const dot = e.type==='goal'?'bg-green-500':e.type==='card'?(e.cardType==='Rood'?'bg-red-600':'bg-yellow-500'):'bg-blue-500';
-  const min = `<div class="w-9 text-neutral-400 font-mono text-sm flex-none">${e.minute}'</div>`;
+  const min = `<div class="w-9 text-neutral-400 font-mono text-sm flex-none">${fmtMinute(e)}'</div>`;
   const del = allowDelete ? `<button data-act="editEvent" data-id="${e.id}" class="btn text-neutral-500 px-1 text-xs">✎</button><button data-act="delEvent" data-id="${e.id}" class="btn text-neutral-600 px-1 text-xs">✕</button>` : '';
   if (rightAlign){
     return `<div class="flex gap-2 items-start py-2 border-b border-[#222] justify-end text-right">
@@ -385,6 +415,7 @@ function render(){
   const v = view();
   if (!t && v !== 'settings'){ app.innerHTML = welcomeScreen(); bind(); return; }
   if (v === 'dashboard') app.innerHTML = dashboardView(t, s);
+  else if (v === 'playerstats') app.innerHTML = playerStatsView(t, s);
   else if (v === 'players') app.innerHTML = playersView(t);
   else if (v === 'agenda') app.innerHTML = agendaView(t, s);
   else if (v === 'live'){
@@ -411,7 +442,7 @@ const WRITE_ACTS = new Set([
   'addPlayer','addStaff','bulkAdd','editPlayer','delPlayer',
   'addMatch','importICS','editPlayed','delMatch',
   'goalPlus','goalMinus','timerToggle','timerPlus','timerMinus','firstHalf','secondHalf',
-  'logGoal','logCard','logSub','delEvent','editEvent','lineup','finishMatch','undo','generateReport','addGuest',
+  'logGoal','logCard','logSub','delEvent','editEvent','lineup','finishMatch','undo','generateReport','editReport','saveReport','addGuest',
   'addTeam','renameTeam','addSeason','removeLogo','importData'
 ]);
 
@@ -480,14 +511,15 @@ function vertaalAuthError(e, mode){
   return (e && e.message) || 'Inloggen mislukt.';
 }
 
-async function loadMembers(){
+async function fetchMembers(){
   if (!db || !isAdmin()) return;
   try {
     const snap = await db.collection('users').get();
     MEMBERS = snap.docs.map(d => ({ uid:d.id, ...d.data() }));
-    render();
+    MEMBERS_LOADED = true;
   } catch (e) { console.error('Leden laden mislukt:', e); }
 }
+async function loadMembers(){ await fetchMembers(); render(); }
 function header(title, sub){
   return `<div class="px-4 pt-6 pb-2">
     <h1 class="text-2xl font-bold">${esc(title)}</h1>
@@ -547,15 +579,14 @@ function dashboardView(t, s){
   const topassist = [...stats].sort((a,b)=>b.assists-a.assists)[0];
   const lm = s ? liveFeaturedMatch(t.id, s.id) : null;
   const nm = s ? nextMatch(t.id, s.id) : null;
-  const gespeeld = s ? seasonMatches(t.id,s.id).filter(m=>m.status==='Gespeeld').length : 0;
-  const totGoals = stats.reduce((a,b)=>a+b.goals,0);
+  const lastPlayed = s ? [...seasonMatches(t.id,s.id)].filter(m=>m.status==='Gespeeld').pop() : null;
   const liveLeft = lm ? (lm.homeAway==='Uit'?lm.opponent:t.name) : '';
   const liveRight = lm ? (lm.homeAway==='Uit'?t.name:lm.opponent) : '';
 
   return `<div class="px-4 pt-6 pb-2 flex items-center gap-3">
     ${t.logo ? `<img src="${t.logo}" alt="logo" class="w-8 h-8 rounded-lg object-cover border border-[#333] flex-none">` : ''}
-    <div class="min-w-0">
-      <h1 class="text-2xl font-bold truncate">${esc(t.name)}</h1>
+    <div class="min-w-0 flex-1">
+      <h1 class="text-2xl font-bold leading-tight break-words">${esc(t.name)}</h1>
       <p class="text-neutral-400 text-sm">${s ? 'Seizoen '+esc(s.name) : 'Nog geen seizoen'}</p>
     </div>
   </div>` + `
@@ -588,26 +619,60 @@ function dashboardView(t, s){
 
     <h3 class="text-lg font-bold">Seizoenstotalen</h3>
     <div class="grid grid-cols-2 gap-3">
-      <div class="card p-4">
-        <div class="text-neutral-400 text-sm">Topscorer</div>
+      <button ${topscorer && topscorer.goals>0 ? `data-act="openPlayerStats" data-id="${topscorer.id}"` : ''} class="btn card p-4 text-left">
+        <div class="text-neutral-400 text-sm">Topscorer ${topscorer && topscorer.goals>0 ? '<span class="text-green-400">›</span>' : ''}</div>
         <div class="text-lg font-bold mt-1 truncate">${topscorer && topscorer.goals>0 ? esc(topscorer.name) : 'Nog niet bekend'}</div>
         <div class="text-neutral-500 text-xs">${topscorer ? topscorer.goals : 0} goals</div>
-      </div>
-      <div class="card p-4">
-        <div class="text-neutral-400 text-sm">Meeste assists</div>
+      </button>
+      <button ${topassist && topassist.assists>0 ? `data-act="openPlayerStats" data-id="${topassist.id}"` : ''} class="btn card p-4 text-left">
+        <div class="text-neutral-400 text-sm">Meeste assists ${topassist && topassist.assists>0 ? '<span class="text-green-400">›</span>' : ''}</div>
         <div class="text-lg font-bold mt-1 truncate">${topassist && topassist.assists>0 ? esc(topassist.name) : 'Nog niet bekend'}</div>
         <div class="text-neutral-500 text-xs">${topassist ? topassist.assists : 0} assists</div>
-      </div>
-      <div class="card p-4">
-        <div class="text-neutral-400 text-sm">Gespeelde wedstrijden</div>
-        <div class="text-3xl font-bold mt-1">${gespeeld}</div>
-      </div>
-      <div class="card p-4">
-        <div class="text-neutral-400 text-sm">Doelpunten voor</div>
-        <div class="text-3xl font-bold mt-1">${totGoals}</div>
-      </div>
+      </button>
+      <button ${lastPlayed ? `data-act="startLive" data-id="${lastPlayed.id}"` : ''} class="btn card p-4 text-left col-span-2">
+        <div class="text-neutral-400 text-sm">Laatst gespeeld ${lastPlayed ? '<span class="text-green-400">›</span>' : ''}</div>
+        ${lastPlayed ? `
+        <div class="flex items-center justify-between gap-2 mt-1">
+          <div class="text-sm font-bold truncate">${esc(matchTitle(lastPlayed))}</div>
+          <div class="text-xl font-extrabold flex-none">${lastPlayed.homeScore||0} – ${lastPlayed.awayScore||0}</div>
+        </div>`
+        : `<div class="text-neutral-500 text-sm mt-1">Nog geen wedstrijd gespeeld</div>`}
+      </button>
     </div>
   </div>`;
+}
+
+function playerStatsView(t, s){
+  if (!s) return header('Spelerstatistieken') + '<div class="px-4"><button data-act="backDash" class="text-neutral-400 text-sm">← Terug</button><p class="text-neutral-400 mt-2">Maak eerst een seizoen aan.</p></div>';
+  const stats = computeStats(t.id, s.id);
+  const sel = stats.find(r => r.id === PREFS.pdId) || null;
+  const list = [...stats].sort((a,b)=>a.name.localeCompare(b.name,'nl',{sensitivity:'base'}));
+  const big = (label,val,cls)=>`<div class="card p-4 text-center">
+      <div class="text-neutral-400 text-[11px] uppercase tracking-wide">${label}</div>
+      <div class="text-4xl font-extrabold mt-1 ${cls||''}">${val}</div></div>`;
+  return `<div class="px-4 pt-6 pb-2">
+      <button data-act="backDash" class="text-neutral-400 text-sm mb-2">← Terug</button>
+      <h1 class="text-2xl font-bold">Spelerstatistieken</h1>
+      <p class="text-neutral-400 text-sm">${esc(t.name)} · ${esc(s.name)}</p>
+    </div>
+    <div class="px-4 space-y-3">
+      <input id="pdSearch" type="text" placeholder="Zoek een speler…" autocomplete="off" class="w-full py-3 px-3">
+      ${sel ? `
+      <div>
+        <div class="text-lg font-bold mb-2">${esc(sel.name)}${sel.number!=null?` <span class="text-neutral-500 text-sm">#${sel.number}</span>`:''}</div>
+        <div class="grid grid-cols-2 gap-3">
+          ${big('Goals', sel.goals, 'text-green-400')}
+          ${big('Assists', sel.assists, 'text-blue-300')}
+          ${big('Wedstrijden', sel.gp, '')}
+          ${big('Minuten', sel.minutes, '')}
+        </div>
+      </div>` : `<p class="text-neutral-500 text-sm">Zoek of kies hieronder een speler om de statistieken te zien.</p>`}
+      <div id="pdList" class="space-y-2 pt-1">
+        ${list.map(r=>`<button data-act="selPlayerStat" data-id="${r.id}" data-name="${esc((r.name||'').toLowerCase())}" class="pd-item btn card p-3 w-full text-left flex items-center justify-between ${sel&&sel.id===r.id?'border border-green-600':''}">
+          <span class="font-semibold truncate">${esc(r.name)}${r.number!=null?` <span class="text-neutral-500 text-xs">#${r.number}</span>`:''}</span>
+          <span class="text-neutral-500 text-xs flex-none">${r.goals}G · ${r.assists}A</span></button>`).join('')}
+      </div>
+    </div>`;
 }
 
 function playersView(t){
@@ -654,7 +719,7 @@ function agendaView(t, s){
   if (!s) return header('Wedstrijden') + '<div class="px-4 text-neutral-400">Maak eerst een seizoen aan bij Instellingen.</div>';
   const matches = seasonMatches(t.id, s.id);
   const planned = matches.filter(m => m.status !== 'Gespeeld');
-  const played  = matches.filter(m => m.status === 'Gespeeld');
+  const played  = matches.filter(m => m.status === 'Gespeeld').reverse();
   const row = m => {
     const gespeeld = m.status==='Gespeeld';
     let actBtn;
@@ -709,8 +774,13 @@ function liveView(t, s){
 
   return `<div class="px-4 pt-6 pb-2">
     <button data-act="closeLive" class="text-neutral-400 text-sm mb-2">← Terug</button>
-    <h1 class="text-xl font-bold">${esc(matchTitle(m))}</h1>
-    <p class="text-neutral-400 text-sm">${esc(m.date)} · ${esc(m.homeAway)}</p>
+    <div class="flex items-start justify-between gap-2">
+      <div class="min-w-0">
+        <h1 class="text-xl font-bold">${esc(matchTitle(m))}</h1>
+        <p class="text-neutral-400 text-sm">${esc(m.date)} · ${esc(m.homeAway)}</p>
+      </div>
+      <button data-act="toggleNotify" title="Meldingen bij doelpunt" class="btn ${PREFS.notifyGoals?'bg-green-600':'bg-[#262626] hover:bg-[#333]'} px-3 py-1.5 rounded-lg text-sm font-semibold flex-none mt-1">${PREFS.notifyGoals?'🔔 Aan':'🔔 Uit'}</button>
+    </div>
   </div>
   <div class="px-4 space-y-4">
 
@@ -741,7 +811,7 @@ function liveView(t, s){
     <!-- Timer (tweefasen) -->
     <div class="card p-4 text-center">
       <div id="timerDisplay" class="text-5xl font-bold font-mono">${timerHTML()}</div>
-      <div class="text-neutral-500 text-xs mt-1">${LIVE.half===1?'1e helft':'2e helft'} · minuut ${liveMin()}</div>
+      <div class="text-neutral-500 text-xs mt-1">${LIVE.half===1?'1e helft':'2e helft'} · minuut ${liveMinLabel()}</div>
       <div class="flex gap-2 mt-3 justify-center">
         <button data-act="timerMinus" class="btn bg-[#262626] w-12 h-11 rounded-lg text-sm font-bold">−1'</button>
         <button data-act="timerToggle" class="btn ${LIVE.running?'bg-yellow-600 hover:bg-yellow-500':'bg-green-600 hover:bg-green-500'} flex-1 h-11 rounded-lg font-bold">${LIVE.running?'⏸ Pauze':'▶ Start'}</button>
@@ -786,12 +856,11 @@ function liveView(t, s){
         <h3 class="font-bold">Verslag</h3>
         <button data-act="generateReport" class="btn text-green-400 text-sm font-semibold">✨ Genereer</button>
       </div>
-      <div id="reportArea" class="card p-4 text-sm whitespace-pre-line ${m.report?'':'text-neutral-500'}">
-  ${m.report ? m.report : 'Nog geen verslag. Rond de wedstrijd af of tik op Genereer (gebruikt notities + scoreverloop).'}
-</div>
-      <button data-act="shotReport" class="btn w-full bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl font-semibold mt-2 text-sm">
-        🖼 Screenshot van verslag opslaan
-      </button>
+      <div id="reportArea" class="card p-4 text-sm whitespace-pre-line ${m.report?'':'text-neutral-500'}">${m.report ? reportHTML(m.report) : 'Nog geen verslag. Rond de wedstrijd af of tik op Genereer (gebruikt notities + scoreverloop).'}</div>
+      <div class="grid grid-cols-2 gap-2 mt-2">
+        <button data-act="editReport" class="btn bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl font-semibold text-sm">✎ Bewerken</button>
+        <button data-act="copyReport" class="btn bg-[#262626] hover:bg-[#333] py-2.5 rounded-xl font-semibold text-sm">📋 Kopiëren verslag</button>
+      </div>
     </div>
 
     <!-- Wedstrijdverloop -->
@@ -807,9 +876,10 @@ function liveView(t, s){
         </div>
         ${events.length ? events.map(e => eventRow(e, true, (e.team==='opp')? (m.homeAway==='Uit') : (m.homeAway!=='Uit'))).join('') : '<div class="text-neutral-500 text-sm text-center py-4">Nog geen acties. Log een goal, kaart of wissel.</div>'}
       </div>
-      <button data-act="shotTimelineWithReport" class="btn w-full bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold mt-2">
-        🖼 Screenshot van verloop + verslag
-      </button>
+      <div class="grid grid-cols-2 gap-2 mt-2">
+        <button data-act="shotTimelineOnly" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold text-sm">🖼 Alleen verloop</button>
+        <button data-act="shotTimelineWithReport" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-semibold text-sm">🖼 Verloop + verslag</button>
+      </div>
     </div>
   </div>`;
 }
@@ -834,15 +904,14 @@ function matchSummaryView(m){
     const homeSide = (e.team==='opp') ? !ourHome : ourHome;
     return { e, badge, homeSide };
   });
-  const half = (mn)=> mn<=45 ? 1 : 2;
-  const h1 = rowsData.filter(x=>half(x.e.minute)===1);
-  const h2 = rowsData.filter(x=>half(x.e.minute)===2);
+  const h1 = rowsData.filter(x=>evHalf(x.e)===1);
+  const h2 = rowsData.filter(x=>evHalf(x.e)===2);
   const halfScore = (arr)=>{ let h=0,a=0; arr.forEach(x=>{ if(x.e.type==='goal'){ const hg=(x.e.team==='opp')?!ourHome:ourHome; if(hg)h++; else a++; } }); return `${h} - ${a}`; };
 
   const nm = (id)=> displayName(id);
   const sumRow = (x)=>{
     const {e, badge, homeSide} = x;
-    const min = `${e.minute}'`;
+    const min = `${fmtMinute(e)}'`;
     let icon='', content='';
     if (e.type==='goal'){
       icon='⚽';
@@ -889,7 +958,10 @@ function matchSummaryView(m){
     : `<div class="w-14 h-14 rounded-2xl bg-[#262626] mx-auto flex items-center justify-center text-2xl">⚽</div>`;
 
   return `<div class="px-4 pt-6 pb-2">
-      <button data-act="closeLive" class="text-neutral-400 text-sm mb-3">← Terug</button>
+      <button data-act="closeLive" class="text-neutral-400 text-sm mb-2">← Terug</button>
+      <div class="flex justify-end">
+        <button data-act="toggleNotify" title="Meldingen bij doelpunt" class="btn ${PREFS.notifyGoals?'bg-green-600':'bg-[#262626] hover:bg-[#333]'} px-3 py-1.5 rounded-lg text-sm font-semibold flex-none">${PREFS.notifyGoals?'🔔 Aan':'🔔 Uit'}</button>
+      </div>
     </div>
     <div class="px-4">
       <div class="grid grid-cols-3 items-center text-center gap-2">
@@ -901,7 +973,7 @@ function matchSummaryView(m){
         </div>
         <div>${logoBox(rightLogo)}<div class="mt-2 font-semibold text-sm leading-tight">${esc(rightName)}</div></div>
       </div>
-     ${m.report ? `<h3 class="text-lg font-bold mt-5 mb-1">Verslag</h3><div class="card p-4 text-sm whitespace-pre-line">${m.report}</div>` : ''}
+     ${m.report ? `<h3 class="text-lg font-bold mt-5 mb-1">Verslag</h3><div class="card p-4 text-sm whitespace-pre-line">${reportHTML(m.report)}</div>` : ''}
       <h3 class="text-lg font-bold mt-5 mb-1">Samenvatting</h3>
       ${(h1.length||h2.length) ? section('1E HELFT', h1) + section('2E HELFT', h2)
          : '<div class="card p-4 text-neutral-400 text-sm">Nog geen gebeurtenissen geregistreerd.</div>'}
@@ -917,7 +989,7 @@ function statsView(t, s){
   });
   const cols = [['name','Speler'],['gp','GW'],['starts','Bas'],['subIn','Wis'],['goals','G'],['assists','A'],['cs','CS'],['yellow','🟨'],['red','🟥'],['minutes','Min']];
   const th = cols.map(([k,l]) => `<th data-sort="${k}" class="px-2 py-2 text-left cursor-pointer whitespace-nowrap ${sortKey===k?'text-green-400':'text-neutral-400'}">${l}${sortKey===k?' ▾':''}</th>`).join('');
-  const body = rows.map(r => `<tr class="border-t border-[#222]">
+  const body = rows.map(r => `<tr class="border-t border-[#222]" data-name="${esc((r.name||'').toLowerCase())}">
       <td class="px-2 py-2 font-medium whitespace-nowrap">${esc(r.name)}${r.number!=null?` <span class="text-neutral-500 text-xs">#${r.number}</span>`:''}</td>
       <td class="px-2 py-2 text-center">${r.gp}</td>
       <td class="px-2 py-2 text-center">${r.starts||''}</td>
@@ -934,6 +1006,7 @@ function statsView(t, s){
       <button data-act="exportCSV" class="btn bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">⬇ Export CSV</button>
       <button data-act="printTable" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">🖼 Screenshot / print</button>
     </div>
+    <input id="statSearch" type="text" placeholder="Zoek je naam…" autocomplete="off" class="w-full py-2.5 px-3">
     <div id="printArea" class="card p-2 overflow-x-auto">
       <div class="px-2 py-2 font-bold hidden print:block">${esc(t.name)} — Statistieken ${esc(s.name)}</div>
       <table class="w-full text-sm">
@@ -952,6 +1025,14 @@ function settingsView(t, s){
   <div class="px-4 space-y-4">
     ${accountCard()}
     ${membersCard()}
+    <div class="card p-4 space-y-3">
+      <h3 class="font-bold">Meldingen</h3>
+      <div class="flex items-center justify-between gap-3">
+        <div class="text-sm text-neutral-400">Melding bij een doelpunt
+          <span class="block text-xs text-neutral-500">Per toestel. Werkt zolang de app openstaat in je browser (ook op een achtergrond-tabblad). Je kunt dit ook per wedstrijd aanzetten met het belletje boven in het Live-scherm.</span></div>
+        <button data-act="toggleNotify" class="btn ${PREFS.notifyGoals?'bg-green-600':'bg-[#262626] hover:bg-[#333]'} px-4 py-2.5 rounded-xl text-sm font-semibold flex-none">${PREFS.notifyGoals?'🔔 Aan':'Uit'}</button>
+      </div>
+    </div>
     <div class="card p-4 space-y-3">
       <h3 class="font-bold">Actief team</h3>
       ${DATA.teams.length ? `<select id="teamSel" class="w-full py-3 px-3 font-semibold">${teamOpts}</select>` : '<p class="text-neutral-400 text-sm">Nog geen team.</p>'}
@@ -987,14 +1068,6 @@ function settingsView(t, s){
         <button data-act="toggleTheme" class="btn bg-[#262626] hover:bg-[#333] px-4 py-2.5 rounded-xl text-sm font-semibold">${PREFS.theme==='light'?'🌙 Donker':'☀️ Licht'}</button>
       </div>
     </div>
-    <div class="card p-4 space-y-3">
-      <h3 class="font-bold">Meldingen</h3>
-      <div class="flex items-center justify-between gap-3">
-        <div class="text-sm text-neutral-400">Melding bij een doelpunt
-          <span class="block text-xs text-neutral-500">Per toestel. Werkt zolang de app openstaat in je browser (ook op een achtergrond-tabblad).</span></div>
-        <button data-act="toggleNotify" class="btn ${PREFS.notifyGoals?'bg-green-600':'bg-[#262626] hover:bg-[#333]'} px-4 py-2.5 rounded-xl text-sm font-semibold flex-none">${PREFS.notifyGoals?'🔔 Aan':'Uit'}</button>
-      </div>
-    </div>
     ${isAdmin() ? `<div class="card p-4 space-y-3">
       <h3 class="font-bold">AI-samenvatting (optioneel)</h3>
       <p class="text-neutral-400 text-sm">Zonder sleutel maakt de app zelf een nette samenvatting uit de notities + het scoreverloop. Wil je échte AI-samenvattingen (Gemini)? Plak dan je eigen Google Gemini API-sleutel. Deze wordt <b>alleen in deze browser</b> bewaard, niet in de code of gedeeld.</p>
@@ -1024,29 +1097,34 @@ function accountCard(){
   </div>`;
 }
 
+function memberRow(u){
+  const me = CURRENT_USER && u.uid===CURRENT_USER.uid;
+  const admin = u.role==='admin';
+  return `<div class="card p-3 flex items-center gap-2">
+    <div class="flex-1 min-w-0">
+      <div class="font-semibold truncate">${esc(u.username||emailToUsername(u.email)||u.uid)}${me?' <span class="text-neutral-500 text-xs">(jij)</span>':''}</div>
+      <div class="text-xs text-neutral-400 truncate">${u.realName?esc(u.realName)+' · ':''}<span class="${admin?'text-green-400':''}">${admin?'admin':'viewer'}</span></div>
+    </div>
+    <button data-act="editMember" data-uid="${u.uid}" class="btn text-neutral-400 px-2">✎</button>
+    <button data-act="toggleRole" data-uid="${u.uid}" data-role="${admin?'viewer':'admin'}" class="btn ${admin?'bg-[#262626] text-neutral-200':'bg-green-600'} text-xs font-bold px-2.5 py-2 rounded-lg">
+      ${admin?'→ viewer':'→ admin'}
+    </button>
+  </div>`;
+}
 function membersCard(){
   if (!isAdmin()) return '';
-  const rows = MEMBERS.map(u => {
-    const me = CURRENT_USER && u.uid===CURRENT_USER.uid;
-    const admin = u.role==='admin';
-    return `<div class="card p-3 flex items-center gap-2">
-      <div class="flex-1 min-w-0">
-        <div class="font-semibold truncate">${esc(u.username||emailToUsername(u.email)||u.uid)}${me?' <span class="text-neutral-500 text-xs">(jij)</span>':''}</div>
-        <div class="text-xs text-neutral-400 truncate">${u.realName?esc(u.realName)+' · ':''}<span class="${admin?'text-green-400':''}">${admin?'admin':'viewer'}</span></div>
-      </div>
-      <button data-act="editMember" data-uid="${u.uid}" class="btn text-neutral-400 px-2">✎</button>
-      <button data-act="toggleRole" data-uid="${u.uid}" data-role="${admin?'viewer':'admin'}" class="btn ${admin?'bg-[#262626] text-neutral-200':'bg-green-600'} text-xs font-bold px-2.5 py-2 rounded-lg">
-        ${admin?'→ viewer':'→ admin'}
-      </button>
-    </div>`;
-  }).join('');
+  const admins = MEMBERS.filter(u => u.role==='admin').length;
+  const viewers = MEMBERS.filter(u => u.role!=='admin').length;
   return `<div class="card p-4 space-y-3">
     <div class="flex items-center justify-between">
-      <h3 class="font-bold">Leden ${MEMBERS.length?`(${MEMBERS.length})`:''}</h3>
+      <h3 class="font-bold">Leden &amp; rollen</h3>
       <button data-act="loadMembers" class="btn text-green-400 text-sm font-semibold">Vernieuwen</button>
     </div>
-    <p class="text-neutral-500 text-xs">Alleen zichtbaar voor admins. Wijzig hier de rol van geregistreerde gebruikers.</p>
-    ${MEMBERS.length ? rows : '<div class="text-neutral-500 text-sm">Nog geen leden geladen of gevonden.</div>'}
+    <div class="grid grid-cols-2 gap-2">
+      <button data-act="openMembers" data-kind="leden" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">👥 Leden${MEMBERS_LOADED?` (${viewers})`:''}</button>
+      <button data-act="openMembers" data-kind="beheerder" class="btn bg-[#262626] hover:bg-[#333] py-3 rounded-xl font-bold">🛡 Beheerder${MEMBERS_LOADED?` (${admins})`:''}</button>
+    </div>
+    <p class="text-neutral-500 text-xs">Tik op een knop om de personen te bekijken en hun naam of rol aan te passen.</p>
     <div class="border-t border-[#262626] pt-3">
       <div class="text-sm font-semibold mb-1">Invite-link voor teamgenoten</div>
       <p class="text-neutral-500 text-xs mb-2">Deel deze link + het teamwachtwoord. Nieuwe mensen kiezen een gebruikersnaam en worden <b>viewer</b>.</p>
@@ -1056,6 +1134,20 @@ function membersCard(){
       </div>
     </div>
   </div>`;
+}
+let MEMBERS_MODAL_KIND = null;
+async function openMembersModal(kind){
+  MEMBERS_MODAL_KIND = kind;
+  if (!MEMBERS_LOADED) await fetchMembers();
+  const adminList = kind==='beheerder';
+  const people = MEMBERS.filter(u => adminList ? u.role==='admin' : u.role!=='admin');
+  const title = adminList ? 'Beheerder' : 'Leden';
+  const hint = adminList
+    ? 'Beheerders (admins) mogen alles bewerken. Tik → viewer om rechten weg te halen.'
+    : 'Leden (viewers) kunnen alleen bekijken. Tik → admin om iemand beheerder te maken.';
+  const body = `<p class="text-neutral-500 text-xs mb-2">${hint}</p>
+    <div class="space-y-2">${people.length ? people.map(memberRow).join('') : `<div class="text-neutral-500 text-sm">Geen ${adminList?'beheerders':'leden'}.</div>`}</div>`;
+  openModal(title, body, '');
 }
 
 function renderNav(){
@@ -1307,7 +1399,7 @@ function dropLineup(pid, x, y){
     if(!wasField){
       pushUndo(m);
       removeFromAll(); (m.onField=m.onField||[]).push(pid);
-      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerInId:pid,playerOutId:null}); subBadge(pid,true); }
+      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),half:LIVE.half,playerInId:pid,playerOutId:null}); subBadge(pid,true); }
       else { m.lineup = (m.onField||[]).slice(); }
     }
     commitLineup(m);
@@ -1317,7 +1409,7 @@ function dropLineup(pid, x, y){
       pushUndo(m);
       if(wasField && m.positions) delete m.positions[pid];
       removeFromAll(); (m.onBench=m.onBench||[]).push(pid);
-      if(wasField && started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
+      if(wasField && started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),half:LIVE.half,playerOutId:pid,playerInId:null}); subBadge(pid,false); }
       else if(!started){ m.lineup = (m.onField||[]).slice(); }
     }
     commitLineup(m);
@@ -1331,7 +1423,7 @@ function dropLineup(pid, x, y){
       if (isGuest) (m.onGuests=m.onGuests||[]).push(pid);
       else (m.onSelection=m.onSelection||[]).push(pid);
 
-      if(wasField && started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
+      if(wasField && started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),half:LIVE.half,playerOutId:pid,playerInId:null}); subBadge(pid,false); }
       else if(!started){ m.lineup = (m.onField||[]).slice(); }
     }
     commitLineup(m);
@@ -1364,14 +1456,14 @@ function dropLineup(pid, x, y){
       pushUndo(m);
       if (m.positions) delete m.positions[pid];
       removeFromAll(); (m.onBench=m.onBench||[]).push(pid);
-      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
+      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),half:LIVE.half,playerOutId:pid,playerInId:null}); subBadge(pid,false); }
     } else {
       pushUndo(m);
       if (m.positions) delete m.positions[pid];
       removeFromAll();
       if (playerGroup(p) === 'gast') (m.onGuests=m.onGuests||[]).push(pid);
       else (m.onSelection=m.onSelection||[]).push(pid);
-      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerOutId:pid,playerInId:null}); subBadge(pid,false); }
+      if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),half:LIVE.half,playerOutId:pid,playerInId:null}); subBadge(pid,false); }
     }
     commitLineup(m);
     return;
@@ -1384,7 +1476,7 @@ function dropLineup(pid, x, y){
     removeFromAll();
     (m.onField=m.onField||[]).push(pid);
     ensurePositions(m);
-    if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),playerInId:pid,playerOutId:null}); subBadge(pid,true); }
+    if(started){ m.events.push({id:uid(),type:'sub',team:'own',minute:liveMin(),half:LIVE.half,playerInId:pid,playerOutId:null}); subBadge(pid,true); }
     else { m.lineup = (m.onField||[]).slice(); }
     commitLineup(m);
   } else {
@@ -1399,7 +1491,7 @@ function dropLineup(pid, x, y){
     }
   }
 }
-function subBadge(pid, inbound){ const b=document.getElementById('subBadge'); if(b){ const p=playerById(pid); b.textContent = `${inbound?'▲ in':'▼ uit'}: ${firstName(p?.name||'')} (${liveMin()}')`; b.classList.remove('hidden'); } }
+function subBadge(pid, inbound){ const b=document.getElementById('subBadge'); if(b){ const p=playerById(pid); b.textContent = `${inbound?'▲ in':'▼ uit'}: ${firstName(p?.name||'')} (${liveMinLabel()}')`; b.classList.remove('hidden'); } }
 async function commitLineup(m){
   renderLineupBody();
   try { await Database.save(DATA); } catch(e){ console.error(e); }
@@ -1429,7 +1521,7 @@ function openPlayerForm(p, group){
 
 function openGoalModal(active){
   const m = DATA.matches.find(x => x.id === LIVE.matchId);
-  openModal(`Goal – ${liveMin()}'`,
+  openModal(`Goal – ${liveMinLabel()}'`,
     sideToggle(active) +
     `<div class="sideOwn ${active==='opp'?'hidden':''}">
       ${field('Wie scoorde?', `<select id="f_scorer" class="w-full mt-1 py-3 px-3">${smartOptions(m,'goals')}</select>`)}
@@ -1458,6 +1550,22 @@ function bind(){
   app.querySelectorAll('[data-mtab]').forEach(b => b.onclick = () => { PREFS.matchTab = b.dataset.mtab; savePrefs(); render(); });
   app.querySelectorAll('#matchNotes').forEach(el => el.onchange = () => { const m=DATA.matches.find(x=>x.id===LIVE.matchId); if(m){ m.notes = el.value; commit(); } });
   app.querySelectorAll('#geminiKeyInput').forEach(el => el.onchange = () => { PREFS.geminiKey = el.value.trim(); savePrefs(); });
+  const pdSearch = document.getElementById('pdSearch');
+  if (pdSearch) pdSearch.oninput = () => {
+    const q = pdSearch.value.trim().toLowerCase();
+    app.querySelectorAll('#pdList .pd-item').forEach(b => { b.style.display = (!q || (b.dataset.name||'').includes(q)) ? '' : 'none'; });
+  };
+  const statSearch = document.getElementById('statSearch');
+  if (statSearch) statSearch.oninput = () => {
+    const q = statSearch.value.trim().toLowerCase();
+    let first = null;
+    app.querySelectorAll('#printArea tbody tr[data-name]').forEach(tr => {
+      const hit = !!q && (tr.dataset.name||'').includes(q);
+      tr.classList.toggle('row-hl', hit);
+      if (hit && !first) first = tr;
+    });
+    if (first) first.scrollIntoView({ block:'nearest' });
+  };
 }
 function bindModal(){
   modalRoot.querySelectorAll('[data-act]').forEach(b => b.onclick = () => handleAct(b.dataset.act, b.dataset));
@@ -1480,6 +1588,29 @@ async function handleAct(act, ds){
   switch(act){
     case 'closeModal': return closeModal();
     case 'gotoSettings': return goto('settings');
+    case 'openPlayerStats': { PREFS.pdId = ds.id; PREFS.view = 'playerstats'; savePrefs(); return render(); }
+    case 'selPlayerStat': { PREFS.pdId = ds.id; savePrefs(); return render(); }
+    case 'backDash': return goto('dashboard');
+    case 'copyReport': {
+      const mm = DATA.matches.find(x=>x.id===LIVE.matchId);
+      if (!mm || !mm.report){ alert('Nog geen verslag om te kopiëren.'); return; }
+      try { await navigator.clipboard.writeText(mm.report); alert('Verslag gekopieerd.'); }
+      catch(e){ alert('Kopiëren lukte niet automatisch. Selecteer de tekst handmatig.'); }
+      return;
+    }
+    case 'editReport': {
+      const mm = DATA.matches.find(x=>x.id===LIVE.matchId); if (!mm) return;
+      return openModal('Verslag bewerken',
+        `<textarea id="rep_edit" rows="14" class="w-full py-3 px-3 text-sm">${esc(mm.report||'')}</textarea>`,
+        `<button data-act="saveReport" class="btn w-full bg-green-600 py-3 rounded-xl font-bold mt-2">Opslaan</button>`);
+    }
+    case 'saveReport': {
+      const mm = DATA.matches.find(x=>x.id===LIVE.matchId); if (!mm) return;
+      const el = document.getElementById('rep_edit'); if (!el) return;
+      pushUndo(mm); mm.report = el.value.trim(); closeModal(); return commit();
+    }
+    case 'shotTimelineOnly': return shotTimeline(false);
+    case 'openMembers': return openMembersModal(ds.kind);
     case 'toggleTheme': { PREFS.theme = (PREFS.theme==='light') ? 'dark' : 'light'; savePrefs(); applyTheme(); return render(); }
     case 'toggleNotify': {
       if (!PREFS.notifyGoals){
@@ -1516,7 +1647,9 @@ async function handleAct(act, ds){
       try { await db.collection('users').doc(ds.uid).set({ username, realName }, { merge:true }); }
       catch(e){ alert('Opslaan mislukt (rechten?).'); return; }
       if (CURRENT_USER && ds.uid===CURRENT_USER.uid){ USER_NAME=username; USER_REALNAME=realName; }
-      closeModal(); return loadMembers();
+      closeModal(); await fetchMembers(); render();
+      if (MEMBERS_MODAL_KIND) return openMembersModal(MEMBERS_MODAL_KIND);
+      return;
     }
     case 'toggleRole': {
       if (!isAdmin() || !db) return;
@@ -1526,7 +1659,9 @@ async function handleAct(act, ds){
       try { await db.collection('users').doc(ds.uid).set({ role: newRole }, { merge:true }); }
       catch (e){ alert('Rol wijzigen mislukt (geen rechten?).'); return; }
       if (CURRENT_USER && ds.uid===CURRENT_USER.uid) USER_ROLE = newRole;
-      return loadMembers();
+      await fetchMembers(); render();
+      if (MEMBERS_MODAL_KIND) return openMembersModal(MEMBERS_MODAL_KIND);
+      return;
     }
 
     case 'addTeam':
@@ -1691,13 +1826,13 @@ async function handleAct(act, ds){
       pushUndo(m);
       const opp = sideVal()==='opp';
       if (opp){
-        m.events.push({ id: uid(), type:'goal', minute: liveMin(), team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null });
+        m.events.push({ id: uid(), type:'goal', minute: liveMin(), half: LIVE.half, team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null });
       } else {
         const scorer = document.getElementById('f_scorer').value;
         const assist = document.getElementById('f_assist').value || null;
         if (assist && assist===scorer){ alert('Een speler kan geen assist op zichzelf geven.'); return; }
         const bodyEl = document.getElementById('f_body'); const body = bodyEl && bodyEl.value!=='—' ? bodyEl.value : null;
-        m.events.push({ id: uid(), type:'goal', minute: liveMin(), team:'own', playerId: scorer, assistId: assist, bodyPart: body });
+        m.events.push({ id: uid(), type:'goal', minute: liveMin(), half: LIVE.half, team:'own', playerId: scorer, assistId: assist, bodyPart: body });
       }
       recomputeScore(m);
       closeModal(); return commit();
@@ -1705,7 +1840,7 @@ async function handleAct(act, ds){
 
     case 'logCard': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
-      return openModal(`Kaart – ${liveMin()}'`,
+      return openModal(`Kaart – ${liveMinLabel()}'`,
         sideToggle('own') +
         `<div class="sideOwn">${field('Speler (op het veld)', `<select id="f_pl" class="w-full mt-1 py-3 px-3">${smartOptions(m,'cards')}</select>`)}</div>
          <div class="sideOpp hidden">${field('Speler tegenstander (optioneel)', inp('f_oppname','Naam of rugnummer'))}</div>` +
@@ -1719,14 +1854,14 @@ async function handleAct(act, ds){
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
       pushUndo(m);
       const ct = modalRoot.querySelector('input[name=ct]:checked').value;
-      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'card', minute: liveMin(), team:'opp', cardType: ct, oppName: document.getElementById('f_oppname').value.trim() || null }); }
-      else { m.events.push({ id: uid(), type:'card', minute: liveMin(), team:'own', cardType: ct, playerId: document.getElementById('f_pl').value }); }
+      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'card', minute: liveMin(), half: LIVE.half, team:'opp', cardType: ct, oppName: document.getElementById('f_oppname').value.trim() || null }); }
+      else { m.events.push({ id: uid(), type:'card', minute: liveMin(), half: LIVE.half, team:'own', cardType: ct, playerId: document.getElementById('f_pl').value }); }
       closeModal(); return commit();
     }
 
     case 'logSub': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
-      return openModal(`Wissel – ${liveMin()}'`,
+      return openModal(`Wissel – ${liveMinLabel()}'`,
         sideToggle('own') +
         `<div class="sideOwn">
           <p class="text-xs text-neutral-500 mb-2">Tip: je kunt ook direct slepen op het veld (Opstelling). Dat legt de wissel automatisch vast.</p>
@@ -1739,12 +1874,12 @@ async function handleAct(act, ds){
     case 'saveSub': {
       const m = DATA.matches.find(x => x.id === LIVE.matchId); if (!m) return;
       pushUndo(m);
-      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'sub', minute: liveMin(), team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null }); }
+      if (sideVal()==='opp'){ m.events.push({ id: uid(), type:'sub', minute: liveMin(), half: LIVE.half, team:'opp', oppName: document.getElementById('f_oppname').value.trim() || null }); }
       else {
         const out = document.getElementById('f_out').value, inId = document.getElementById('f_in').value;
         if (!out || !inId){ alert('Kies zowel een speler UIT als IN.'); return; }
         if (out===inId){ alert('Kies twee verschillende spelers.'); return; }
-        m.events.push({ id: uid(), type:'sub', minute: liveMin(), team:'own', playerOutId: out, playerInId: inId });
+        m.events.push({ id: uid(), type:'sub', minute: liveMin(), half: LIVE.half, team:'own', playerOutId: out, playerInId: inId });
         ensureSquad(m);
         m.onField = (m.onField||[]).filter(id=>id!==out); if(!m.onField.includes(inId)) m.onField.push(inId);
         m.onBench = (m.onBench||[]).filter(id=>id!==inId); if(!m.onBench.includes(out)) m.onBench.push(out);
@@ -1824,8 +1959,7 @@ async function handleAct(act, ds){
     }
 
     /* SCREENSHOT / PRINT HANDLERS */
-    case 'shotReport': return shotReport();
-    case 'shotTimelineWithReport': return shotTimelineWithReport();
+    case 'shotTimelineWithReport': return shotTimeline(true);
     case 'exportCSV': return exportCSV(t, s);
     case 'printTable': return printTableFull(t, s);
 
@@ -1900,8 +2034,9 @@ function buildAutoReport(m){
   const our = ourHome ? m.homeScore : m.awayScore, their = ourHome ? m.awayScore : m.homeScore;
   const uitslag = our>their?'een overwinning':our<their?'een nederlaag':'een gelijkspel';
 
+  const titel = `${us} ${our}-${their} ${opp}`;
   const lines = [];
-  lines.push(`${us} speelde ${String(m.homeAway||'').toLowerCase()} tegen ${opp} en het werd ${our}-${their} — ${uitslag}.`);
+  lines.push(`${us} speelde ${String(m.homeAway||'').toLowerCase()} tegen ${opp} en het werd ${our}-${their}, ${uitslag}.`);
 
   // Chronologische lijst maken van events + notities
   const chrono = [];
@@ -1933,7 +2068,7 @@ function buildAutoReport(m){
     lines.push(`Belangrijkste momenten: ${verloopStr}.`);
   }
 
-  return lines.join(' ');
+  return `${titel}\n\n${lines.join(' ')}`;
 }
 function matchReportData(m){
   const t = currentTeam();
@@ -1953,14 +2088,16 @@ function matchReportData(m){
 
   // Chronologisch verloop + notities samenvoegen
   const chronology = [];
+  const nameSet = new Set();
+  const nm = (id)=>{ const n = displayName(id); if (n && n!=='?') nameSet.add(n); return n; };
 
   (m.events||[]).forEach(e => {
     let txt = '';
-    if (e.type==='goal') txt = `DOELPUNT: ${e.team==='opp'?'tegenstander':displayName(e.playerId)}${e.assistId?` (assist ${displayName(e.assistId)})`:''}${e.bodyPart?` [${e.bodyPart}]`:''}`;
-    else if (e.type==='card') txt = `${e.cardType} kaart voor ${e.team==='opp'?'tegenstander':displayName(e.playerId)}`;
-    else if (e.type==='sub') txt = `Wissel: ${e.team==='opp'?'tegenstander':`${e.playerInId?displayName(e.playerInId)+' in':''}${e.playerOutId?', '+displayName(e.playerOutId)+' uit':''}`}`;
+    if (e.type==='goal') txt = `DOELPUNT: ${e.team==='opp'?'tegenstander':nm(e.playerId)}${e.assistId?` (assist ${nm(e.assistId)})`:''}${e.bodyPart?` [${e.bodyPart}]`:''}`;
+    else if (e.type==='card') txt = `${e.cardType} kaart voor ${e.team==='opp'?'tegenstander':nm(e.playerId)}`;
+    else if (e.type==='sub') txt = `Wissel: ${e.team==='opp'?'tegenstander':`${e.playerInId?nm(e.playerInId)+' in':''}${e.playerOutId?', '+nm(e.playerOutId)+' uit':''}`}`;
     
-    if (txt) chronology.push({ minute: e.minute, text: txt });
+    if (txt) chronology.push({ minute: e.minute, half: e.half, sort: evHalf(e)*1000 + e.minute, text: txt });
   });
 
   if (m.notes && m.notes.trim()) {
@@ -1969,18 +2106,19 @@ function matchReportData(m){
       if (match) {
         const min = parseInt(match[1]);
         const cleanNote = line.replace(/\(\d+\s*(?:min\vert{}minuut\vert{}')?\)/i, '').trim();
-        chronology.push({ minute: min, text: `Opmerking: ${cleanNote}` });
+        chronology.push({ minute: min, sort: (min<=45?1:2)*1000 + min, text: `Opmerking: ${cleanNote}` });
       } else if (line.trim()) {
-        chronology.push({ minute: 999, text: `Sfeer/Algemeen: ${line.trim()}` });
+        chronology.push({ minute: 999, sort: 9e9, text: `Sfeer/Algemeen: ${line.trim()}` });
       }
     });
   }
 
-  chronology.sort((a,b) => a.minute - b.minute);
+  chronology.sort((a,b) => a.sort - b.sort);
 
-  const timelineText = chronology.map(c => c.minute === 999 ? `- ${c.text}` : `${c.minute}' (${c.minute <= 45 ? '1e helft' : '2e helft'}): ${c.text}`).join('\n');
+  const timelineText = chronology.map(c => c.minute === 999 ? `- ${c.text}` : `${fmtMinute(c)}' (${evHalf(c) === 1 ? '1e helft' : '2e helft'}): ${c.text}`).join('\n');
+  const roster = [...nameSet].join(', ');
 
-  return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\n\nSEIZOENSCONTEXT:\n${statsContext || 'Geen seizoensdata'}\n\nVERLOOP & NOTITIES:\n${timelineText || 'Geen gebeurtenissen'}`;
+  return `Team: ${t?t.name:''}\nTegenstander: ${m.opponent}\nThuis/Uit: ${m.homeAway}\nEindstand (thuis-uit): ${m.homeScore}-${m.awayScore}\n\nNAMEN (gebruik UITSLUITEND deze exacte spelling, verzin of verander geen namen):\n${roster || 'Geen spelersnamen'}\n\nSEIZOENSCONTEXT:\n${statsContext || 'Geen seizoensdata'}\n\nVERLOOP & NOTITIES:\n${timelineText || 'Geen gebeurtenissen'}`;
 }
 
 async function geminiCandidates(key){
@@ -2009,7 +2147,7 @@ async function generateReport(){
   const prompt = `Je bent een enthousiaste amateurvoetbal-verslaggever. Schrijf een leuk, vlot en goed leesbaar wedstrijdverslag.
 
 STRUCTUUR & OPMAAK:
-1. Begin met een korte, pakkende en creatieve titel. Zet deze tussen <h2> en </h2> (bijv: <h2>Spektakelstuk op een zonnig sportpark</h2>).
+1. Begin met een korte, pakkende en creatieve titel op de EERSTE regel. Platte tekst, geen opmaaktekens (geen <h2>, geen #, geen sterretjes). Daarna één lege regel.
 2. Verdeel het verslag daarna in duidelijke alinea's met een lege regel ertussen:
    - Alinea 1: Sfeer & De 1e helft.
    - Alinea 2: De 2e helft & Hoogtepunten.
@@ -2019,29 +2157,45 @@ REGELS VOOR TAALGEBRUIK EN INHOUD:
 1. Gebruik normale, begrijpelijke taal (geen moeilijke of ouderwetse woorden zoals 'lazaret', 'reminiscentie', etc.).
 2. Vlot, enthousiast en met gezonde amateurvoetbal-humor geschreven.
 3. Corrigeer spelfouten uit de ruwe notities (bijv. "versiert" wordt "versierd").
-4. Verwerk acties/notities chronologisch in de juiste helft.
+4. Verwerk acties/notities chronologisch in de juiste helft. Blessuretijd staat als 45+x of 90+x; neem dat zo over.
 5. Als een doelpuntmaker of assistgever hoog staat in de seizoensstatistieken (bijv. topscorer), benoem dit leuk!
-6. Gebruik UITSLUITEND de meegegeven feiten, namen en uitslag.
+6. Gebruik UITSLUITEND de meegegeven feiten en uitslag. Neem spelersnamen EXACT over uit de lijst NAMEN hieronder — verander, verkort of verzin geen enkele naam.
+7. Gebruik GEEN gedachtestreepjes (— of –). Schrijf gewone zinnen met komma's en punten.
 
 WEDSTRIJDGEGEVENS:
 ${matchReportData(m)}`;
 
   const btn = [...document.querySelectorAll('[data-act="generateReport"]')][0];
   if (btn){ btn.textContent = '⏳ Bezig…'; btn.style.pointerEvents='none'; }
+
+  async function tryModel(modelName){
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] })
+    });
+    const j = await res.json().catch(()=>null);
+    if (!res.ok) throw new Error((j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status));
+    const txt = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0] && j.candidates[0].content.parts[0].text;
+    if (!txt || !txt.trim()) throw new Error('Leeg antwoord van AI.');
+    return txt;
+  }
+
   let lastErr = '';
   try {
-    const candidates = await geminiCandidates(key);
-    for (const modelName of candidates.slice(0, 6)){
+    // Sneller: eerst het eerder gevonden model proberen, zonder de modellenlijst op te halen.
+    if (PREFS.geminiModel){
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] })
-        });
-        const j = await res.json().catch(()=>null);
-        if (!res.ok){ lastErr = (j && j.error && j.error.message) ? j.error.message : ('HTTP '+res.status); continue; }
-        const txt = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0] && j.candidates[0].content.parts[0].text;
-        if (txt && txt.trim()){ pushUndo(m); m.report = txt.trim(); return commit(); }
-        lastErr = 'Leeg antwoord van AI.';
+        const txt = await tryModel(PREFS.geminiModel);
+        pushUndo(m); m.report = cleanReport(txt); return commit();
+      } catch(e){ lastErr = e.message || 'netwerkfout'; PREFS.geminiModel = null; savePrefs(); }
+    }
+    // Anders de modellenlijst ophalen en het beste werkende model onthouden voor de volgende keer.
+    const candidates = await geminiCandidates(key);
+    for (const modelName of candidates.slice(0, 4)){
+      try {
+        const txt = await tryModel(modelName);
+        PREFS.geminiModel = modelName; savePrefs();
+        pushUndo(m); m.report = cleanReport(txt); return commit();
       } catch(e){ lastErr = e.message || 'netwerkfout'; }
     }
     throw new Error(lastErr || 'Geen werkend model gevonden.');
@@ -2139,94 +2293,129 @@ function exportCSV(t, s){
 
 /* ---------- Screenshot / print Functies ---------- */
 
-// Screenshot van VERLOOP + VERSLAG SAMEN
-function shotTimelineWithReport(){
-  const timelineEl = document.getElementById('timelineArea');
-  const reportEl = document.getElementById('reportArea');
-  const m = DATA.matches.find(x => x.id === LIVE.matchId);
-  const name = m ? `verloop_en_verslag_${matchTitle(m)}_${m.date}` : 'verloop_en_verslag';
+// Nette verloop-opmaak voor de screenshot (geen knoppen; eigen team links, tegenstander rechts)
+function timelineShotHTML(m){
+  const t = currentTeam();
+  const ourHome = m.homeAway !== 'Uit';
+  const leftName = ourHome ? (t?t.name:'Ons team') : m.opponent;
+  const rightName = ourHome ? m.opponent : (t?t.name:'Ons team');
+  const nm = (id)=>esc(displayName(id));
+  const evs = (m.events||[]).slice().sort((a,b)=> (evHalf(a)-evHalf(b)) || (a.minute-b.minute));
+  let hs=0, as=0;
+  const rows = evs.map(e=>{
+    const homeSide = (e.team==='opp') ? !ourHome : ourHome;
+    let txt = '';
+    if (e.type==='goal'){
+      if (homeSide) hs++; else as++;
+      const who = e.team==='opp' ? (e.oppName?esc(e.oppName):'Tegenstander') : `<b>${nm(e.playerId)}</b>`;
+      const assist = (e.team!=='opp' && e.assistId) ? ` <span style="color:#9ca3af;">(${nm(e.assistId)})</span>` : '';
+      const badge = `<span style="display:inline-block;border:1px solid #3a3a3a;border-radius:4px;padding:0 5px;font-size:11px;font-weight:bold;">${hs}-${as}</span>`;
+      txt = homeSide ? `${who}${assist} ${badge} ⚽` : `⚽ ${badge} ${who}${assist}`;
+    } else if (e.type==='card'){
+      const icon = e.cardType==='Rood'?'🟥':'🟨';
+      const who = e.team==='opp' ? (e.oppName?esc(e.oppName):'Tegenstander') : `<b>${nm(e.playerId)}</b>`;
+      txt = homeSide ? `${who} ${icon}` : `${icon} ${who}`;
+    } else if (e.type==='sub'){
+      if (e.team==='opp') txt = homeSide ? `${e.oppName?esc(e.oppName):'Wissel'} 🔁` : `🔁 ${e.oppName?esc(e.oppName):'Wissel'}`;
+      else {
+        const inN = e.playerInId?`<span style="color:#22c55e;">▲ ${nm(e.playerInId)}</span>`:'';
+        const outN = e.playerOutId?` <span style="color:#f87171;">▼ ${nm(e.playerOutId)}</span>`:'';
+        txt = homeSide ? `${(inN+outN)||'Wissel'} 🔁` : `🔁 ${(inN+outN)||'Wissel'}`;
+      }
+    }
+    const minLabel = fmtMinute(e)+"'";
+    const left = homeSide ? txt : '';
+    const right = homeSide ? '' : txt;
+    return `<div style="display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid #222;font-size:13px;line-height:1.35;">
+      <div style="flex:1;text-align:right;">${left}</div>
+      <div style="min-width:42px;text-align:center;color:#9ca3af;font-family:monospace;font-size:12px;">${minLabel}</div>
+      <div style="flex:1;text-align:left;">${right}</div>
+    </div>`;
+  }).join('');
+  const header = `<div style="text-align:center;padding-bottom:10px;margin-bottom:4px;border-bottom:1px solid #2a2a2a;">
+      <div style="font-weight:bold;font-size:15px;">${esc(leftName)} <span style="color:#22c55e;">${m.homeScore||0} - ${m.awayScore||0}</span> ${esc(rightName)}</div>
+      <div style="font-size:11px;color:#9ca3af;margin-top:2px;">${esc(m.date||'')}${m.time?' · '+esc(m.time):''} · ${m.status==='Gespeeld'?'Eindstand':'Tussenstand'}</div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;padding:2px 0 4px;">
+      <span>◀ ${esc(leftName)}</span><span>${esc(rightName)} ▶</span></div>`;
+  return header + (rows || '<div style="text-align:center;color:#6b7280;padding:14px 0;font-size:13px;">Nog geen acties.</div>');
+}
 
-  if (!window.html2canvas || !timelineEl){
+// Screenshot van het VERLOOP (optioneel met het verslag eronder)
+function shotTimeline(withReport){
+  const m = DATA.matches.find(x => x.id === LIVE.matchId);
+  const base = withReport ? 'verloop_en_verslag' : 'verloop';
+  const name = m ? `${base}_${matchTitle(m)}_${m.date}` : base;
+
+  if (!window.html2canvas || !m){
     alert('Screenshot maken vereist internet (voor html2canvas). Open de app in een browsertabblad.');
     return;
   }
 
   const wrapper = document.createElement('div');
-  wrapper.style.padding = '16px';
-  wrapper.style.background = '#171717';
-  wrapper.style.color = '#ffffff';
-  wrapper.style.width = '450px';
+  wrapper.style.cssText = 'position:fixed;left:-10000px;top:0;padding:16px;background:#171717;color:#ffffff;width:450px;font-family:inherit;';
 
-  const timelineClone = timelineEl.cloneNode(true);
-  wrapper.appendChild(timelineClone);
+  // 1) eerst het verloop — schone opmaak, zonder bewerk-/verwijderknoppen
+  const tl = document.createElement('div');
+  tl.style.cssText = 'background:#1f1f1f;border:1px solid #2a2a2a;border-radius:12px;padding:12px;';
+  tl.innerHTML = timelineShotHTML(m);
+  wrapper.appendChild(tl);
 
-  if (reportEl) {
-    const reportHeader = document.createElement('h3');
-    reportHeader.textContent = 'Wedstrijdverslag';
-    reportHeader.style.margin = '16px 0 8px 0';
-    reportHeader.style.fontWeight = 'bold';
-    
-    const reportClone = reportEl.cloneNode(true);
-    
-    wrapper.appendChild(reportHeader);
-    wrapper.appendChild(reportClone);
+  // 2) daarna (optioneel) het verslag eronder — vers opgebouwd uit platte tekst
+  if (withReport && m && m.report){
+    const h = document.createElement('div');
+    h.textContent = 'Wedstrijdverslag';
+    h.style.cssText = 'margin:16px 0 8px 0;font-weight:bold;font-size:16px;';
+    wrapper.appendChild(h);
+
+    const body = document.createElement('div');
+    body.style.cssText = 'background:#1f1f1f;border:1px solid #2a2a2a;border-radius:12px;padding:16px;font-size:13px;line-height:1.5;white-space:pre-line;';
+    const lines = String(m.report).split('\n');
+    let i = 0; while (i<lines.length && !lines[i].trim()) i++;
+    const title = document.createElement('div');
+    title.textContent = lines[i] || '';
+    title.style.cssText = 'font-weight:bold;font-size:15px;margin-bottom:6px;';
+    body.appendChild(title);
+    const rest = document.createElement('div');
+    rest.textContent = lines.slice(i+1).join('\n').replace(/^\n+/, '');
+    body.appendChild(rest);
+    wrapper.appendChild(body);
   }
 
   document.body.appendChild(wrapper);
-
-  html2canvas(wrapper, { backgroundColor:'#171717', scale:2 })
-    .then(canvas => canvas.toBlob(blob => {
-      downloadBlob(blob, safe(name)+'.png');
-      wrapper.remove();
-    }))
-    .catch(() => {
-      wrapper.remove();
-      alert('Screenshot maken lukte niet in deze weergave. Open de app in een browsertabblad.');
-    });
-}
-
-// Screenshot van ALLEEN het verslag
-function shotReport(){
-  const el = document.getElementById('reportArea');
-  const m = DATA.matches.find(x => x.id === LIVE.matchId);
-  const name = m ? `verslag_${matchTitle(m)}_${m.date}` : 'wedstrijdverslag';
-
-  if (window.html2canvas && el){
-    html2canvas(el, { backgroundColor:'#171717', scale:2 })
-      .then(canvas => canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png')))
-      .catch(() => alert('Screenshot maken lukte niet.'));
-  } else {
-    alert('Geen verslag gevonden of html2canvas niet geladen.');
-  }
+  html2canvas(wrapper, { backgroundColor:'#171717', scale:2, useCORS:true, logging:false })
+    .then(canvas => canvas.toBlob(blob => { downloadBlob(blob, safe(name)+'.png'); wrapper.remove(); }))
+    .catch(err => { wrapper.remove(); console.error('Screenshot mislukt:', err); alert('Screenshot maken lukte niet in deze weergave. Open de app in een browsertabblad.'); });
 }
 
 // Screenshot van de VOLLEDIGE statistiekentabel (geen afgesneden kolommen meer)
 function printTableFull(t, s){
   const tableArea = document.getElementById('printArea');
-  if (!tableArea) return;
+  if (!tableArea || !window.html2canvas){ alert('Screenshot maken vereist internet (voor html2canvas). Open de app in een browsertabblad.'); return; }
 
-  const origOverflow = tableArea.style.overflow;
-  const origWidth = tableArea.style.width;
+  const table = tableArea.querySelector('table');
+  const fullWidth = Math.max(tableArea.scrollWidth, table ? table.scrollWidth : 0) + 24;
+  const light = document.documentElement.classList.contains('light');
 
-  tableArea.style.overflow = 'visible';
-  tableArea.style.width = tableArea.scrollWidth + 'px';
+  // Kloon de tabel in een off-screen wrapper op volle breedte, zodat niets wordt afgesneden.
+  const wrapper = document.createElement('div');
+  wrapper.style.cssText = `position:fixed;left:-10000px;top:0;padding:12px;width:${fullWidth}px;background:${light?'#ffffff':'#171717'};color:${light?'#000000':'#ffffff'};`;
+  const clone = tableArea.cloneNode(true);
+  clone.style.overflow = 'visible';
+  clone.style.width = fullWidth + 'px';
+  wrapper.appendChild(clone);
+  document.body.appendChild(wrapper);
 
-  html2canvas(tableArea, {
-    backgroundColor: document.documentElement.classList.contains('light') ? '#ffffff' : '#171717',
-    scale: 2,
-    windowWidth: tableArea.scrollWidth + 100
-  }).then(canvas => {
-    tableArea.style.overflow = origOverflow;
-    tableArea.style.width = origWidth;
-
-    const name = (t && s) ? `statistieken_${t.name}_${s.name}` : 'statistieken';
-    canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'));
-  }).catch(err => {
-    tableArea.style.overflow = origOverflow;
-    tableArea.style.width = origWidth;
-    console.error('Screenshot mislukt:', err);
-    alert('Screenshot maken mislukt.');
-  });
+  html2canvas(wrapper, { backgroundColor: light ? '#ffffff' : '#171717', scale: 2, windowWidth: fullWidth + 100 })
+    .then(canvas => {
+      wrapper.remove();
+      const name = (t && s) ? `statistieken_${t.name}_${s.name}` : 'statistieken';
+      canvas.toBlob(blob => downloadBlob(blob, safe(name)+'.png'));
+    }).catch(err => {
+      wrapper.remove();
+      console.error('Screenshot mislukt:', err);
+      alert('Screenshot maken mislukt.');
+    });
 }
 
 function safe(n){ return String(n).replace(/[^\w.\-]+/g,'_'); }
